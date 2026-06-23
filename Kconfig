@@ -1,0 +1,19 @@
+config MOTOR_SIM
+	bool "Motor simulation mode"
+	default n
+	help
+	  Replace ADC current sensing and encoder feedback with a simulated
+	  surface-mounted PMSM (SPMSM) motor model. PWM outputs remain active
+	  so duty cycles can be verified with an oscilloscope.
+
+	  Motor model parameters (src/sim/sim.h):
+	    R    = 0.5  Ω       stator resistance
+	    L    = 1 mH         stator inductance (Ld = Lq)
+	    psi  = 0.05 Wb      permanent-magnet flux linkage
+	    J    = 1e-5 kg·m²   moment of inertia
+	    B    = 1e-4 N·m·s   viscous friction
+
+	  Enable in prj.conf with CONFIG_MOTOR_SIM=y.
+
+# Pull in Zephyr's full Kconfig tree (required when this file is used as root).
+source "Kconfig.zephyr"

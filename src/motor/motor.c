@@ -2,16 +2,24 @@
 
 #include <math.h>
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/logging/log.h>
+
+#ifdef CONFIG_MOTOR_SIM
+#include "sim/sim.h"
+static sim_ctx_t g_sim;
+#else
+#include <zephyr/drivers/adc.h>
+#endif
 
 LOG_MODULE_REGISTER(motor, LOG_LEVEL_INF);
 
 /* ─── Device tree handles ────────────────────────────────────────────────── */
 
+#ifndef CONFIG_MOTOR_SIM
 static const struct device *adc_dev = DEVICE_DT_GET(DT_NODELABEL(adc1));
+#endif
 
 /* PWM_DT_SPEC_GET is consumer-side API (needs a 'pwms' property).
  * We access the PWM devices directly by label and supply channel numbers. */
@@ -29,14 +37,18 @@ static const struct device *pwm_c_dev =
 static const struct gpio_dt_spec motor_en_gpio =
 	GPIO_DT_SPEC_GET(DT_PATH(motor_gpios, motor_en), gpios);
 
+#ifndef CONFIG_MOTOR_SIM
 static const struct gpio_dt_spec enc_a_gpio =
 	GPIO_DT_SPEC_GET(DT_PATH(encoder, enc_a), gpios);
 static const struct gpio_dt_spec enc_b_gpio =
 	GPIO_DT_SPEC_GET(DT_PATH(encoder, enc_b), gpios);
 static const struct gpio_dt_spec enc_z_gpio =
 	GPIO_DT_SPEC_GET(DT_PATH(encoder, enc_z), gpios);
+#endif
 
-/* ─── ADC configuration ──────────────────────────────────────────────────── */
+/* ─── ADC configuration (real hardware only) ─────────────────────────────── */
+
+#ifndef CONFIG_MOTOR_SIM
 
 static struct adc_channel_cfg adc_ch6_cfg = {
 	.gain             = ADC_GAIN_1,
@@ -63,7 +75,11 @@ static const struct adc_sequence adc_seq = {
 	.resolution  = 12,
 };
 
-/* ─── Encoder state (modified in ISR, read in thread) ─────────────────────── */
+#endif /* CONFIG_MOTOR_SIM */
+
+/* ─── Encoder state and current offsets (real hardware only) ─────────────── */
+
+#ifndef CONFIG_MOTOR_SIM
 
 static atomic_t enc_count = ATOMIC_INIT(0);
 static volatile int32_t enc_count_prev;
@@ -117,10 +133,10 @@ static void enc_z_isr(const struct device *dev,
 	atomic_set(&enc_count, c - rem);
 }
 
-/* ─── Current offset calibration ─────────────────────────────────────────── */
-
 static int16_t cal_offset_ch6  = 2048;
 static int16_t cal_offset_ch12 = 2048;
+
+#endif /* CONFIG_MOTOR_SIM */
 
 /* ─── PWM period (ns) ────────────────────────────────────────────────────── */
 
@@ -130,6 +146,10 @@ static int16_t cal_offset_ch12 = 2048;
 
 int motor_init(void)
 {
+#ifdef CONFIG_MOTOR_SIM
+	LOG_WRN("SIMULATION MODE — ADC and encoder are synthetic");
+	sim_init(&g_sim);
+#else
 	int ret;
 
 	/* --- ADC --- */
@@ -143,28 +163,29 @@ int motor_init(void)
 
 	ret = adc_channel_setup(adc_dev, &adc_ch12_cfg);
 	if (ret) { LOG_ERR("ADC ch12 setup: %d", ret); return ret; }
+#endif /* CONFIG_MOTOR_SIM */
 
-	/* --- PWM --- */
+	/* --- PWM (always active — oscilloscope verification in sim mode) --- */
 	if (!device_is_ready(pwm_a_dev) || !device_is_ready(pwm_b_dev) ||
 	    !device_is_ready(pwm_c_dev)) {
 		LOG_ERR("PWM device(s) not ready");
 		return -ENODEV;
 	}
 
-	/* Start all phases at 50% (zero voltage, safe starting point) */
 	uint32_t half = PWM_PERIOD_NS / 2;
 
 	pwm_set(pwm_a_dev, PWM_CH_A, PWM_PERIOD_NS, half, PWM_POLARITY_NORMAL);
 	pwm_set(pwm_b_dev, PWM_CH_B, PWM_PERIOD_NS, half, PWM_POLARITY_NORMAL);
 	pwm_set(pwm_c_dev, PWM_CH_C, PWM_PERIOD_NS, half, PWM_POLARITY_NORMAL);
 
-	/* --- Motor enable GPIO --- */
+	/* --- Motor enable GPIO (always active) --- */
 	if (!gpio_is_ready_dt(&motor_en_gpio)) {
 		LOG_ERR("Motor enable GPIO not ready");
 		return -ENODEV;
 	}
 	gpio_pin_configure_dt(&motor_en_gpio, GPIO_OUTPUT_INACTIVE);
 
+#ifndef CONFIG_MOTOR_SIM
 	/* --- Encoder GPIOs --- */
 	if (!gpio_is_ready_dt(&enc_a_gpio) ||
 	    !gpio_is_ready_dt(&enc_b_gpio) ||
@@ -190,6 +211,7 @@ int motor_init(void)
 	gpio_pin_interrupt_configure_dt(&enc_z_gpio, GPIO_INT_EDGE_RISING);
 
 	enc_time_prev_us = k_uptime_get() * 1000LL;
+#endif /* CONFIG_MOTOR_SIM */
 
 	LOG_INF("Motor hardware initialised");
 	return 0;
@@ -211,6 +233,10 @@ bool motor_is_enabled(void)
 
 int motor_read_currents(float *ia, float *ib)
 {
+#ifdef CONFIG_MOTOR_SIM
+	sim_get_currents(&g_sim, ia, ib);
+	return 0;
+#else
 	struct adc_sequence seq = adc_seq;  /* local copy so we can re-read */
 	int ret = adc_read(adc_dev, &seq);
 
@@ -219,16 +245,19 @@ int motor_read_currents(float *ia, float *ib)
 		return ret;
 	}
 
-	/* Convert raw → amps (subtract calibrated zero offset) */
 	*ia = (adc_buf[0] - cal_offset_ch6)  * MOTOR_CURRENT_SCALE;
 	*ib = (adc_buf[1] - cal_offset_ch12) * MOTOR_CURRENT_SCALE;
 
 	return 0;
+#endif
 }
 
 int motor_calibrate_currents(void)
 {
-	/* Average several samples with motor stopped */
+#ifdef CONFIG_MOTOR_SIM
+	LOG_INF("Simulation mode — calibration is a no-op");
+	return 0;
+#else
 	int32_t sum_a = 0, sum_b = 0;
 	const int N = 64;
 	struct adc_sequence seq = adc_seq;
@@ -247,38 +276,45 @@ int motor_calibrate_currents(void)
 	LOG_INF("Current offsets: ch6=%d ch12=%d",
 	        cal_offset_ch6, cal_offset_ch12);
 	return 0;
+#endif
 }
 
 /* ─── Encoder ───────────────────────────────────────────────────────────── */
 
 void motor_reset_encoder(void)
 {
+#ifdef CONFIG_MOTOR_SIM
+	sim_reset(&g_sim);
+#else
 	atomic_set(&enc_count, 0);
 	enc_count_prev   = 0;
 	enc_time_prev_us = k_uptime_get() * 1000LL;
+#endif
 }
 
 float motor_read_encoder(float *theta_rad, float *omega_rad_s)
 {
+#ifdef CONFIG_MOTOR_SIM
+	sim_get_encoder(&g_sim, theta_rad, omega_rad_s);
+	return sim_get_speed_rpm(&g_sim);
+#else
 	static const float CPR4   = MOTOR_ENCODER_CPR * 4.0f;
 	static const float TWO_PI = 6.28318530717959f;
 
 	int32_t count = (int32_t)atomic_get(&enc_count);
 	int64_t now_us = k_uptime_get() * 1000LL;
 
-	/* Mechanical angle */
 	int32_t pos_mod = count % (int32_t)(CPR4);
 
 	if (pos_mod < 0) { pos_mod += (int32_t)CPR4; }
 
 	*theta_rad = (float)pos_mod * TWO_PI / CPR4;
 
-	/* Angular velocity from finite difference */
 	int64_t dt_us = now_us - enc_time_prev_us;
 	float   dt    = (float)dt_us * 1e-6f;
 	float   omega = 0.0f;
 
-	if (dt > 0.0001f) {  /* Avoid division by zero at startup */
+	if (dt > 0.0001f) {
 		int32_t delta = count - enc_count_prev;
 
 		omega = (float)delta * TWO_PI / CPR4 / dt;
@@ -289,7 +325,8 @@ float motor_read_encoder(float *theta_rad, float *omega_rad_s)
 
 	*omega_rad_s = omega;
 
-	return omega * (60.0f / TWO_PI);  /* RPM */
+	return omega * (60.0f / TWO_PI);
+#endif
 }
 
 /* ─── PWM output ────────────────────────────────────────────────────────── */
@@ -304,3 +341,29 @@ void motor_set_pwm(float da, float db, float dc)
 	pwm_set(pwm_b_dev, PWM_CH_B, PWM_PERIOD_NS, pb, PWM_POLARITY_NORMAL);
 	pwm_set(pwm_c_dev, PWM_CH_C, PWM_PERIOD_NS, pc, PWM_POLARITY_NORMAL);
 }
+
+/* ─── Simulation update (CONFIG_MOTOR_SIM only) ──────────────────────────── */
+
+#ifdef CONFIG_MOTOR_SIM
+void motor_sim_update(float vd, float vq, float dt)
+{
+	sim_set_voltages(&g_sim, vd, vq);
+	sim_step(&g_sim, dt);
+}
+
+void motor_sim_set_load(float T_load_nm)
+{
+	sim_set_load(&g_sim, T_load_nm);
+}
+
+const sim_ctx_t *motor_sim_get_ctx(void)
+{
+	return &g_sim;
+}
+
+void motor_sim_set_params(float R, float L_H, float psi_Wb,
+                          float J_kgm2, float B_Nms)
+{
+	sim_set_params(&g_sim, R, L_H, psi_Wb, J_kgm2, B_Nms);
+}
+#endif /* CONFIG_MOTOR_SIM */

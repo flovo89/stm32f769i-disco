@@ -54,3 +54,25 @@ int motor_calibrate_currents(void);
 
 /* Encoder count — exposed so alignment can reset it. */
 void motor_reset_encoder(void);
+
+#ifdef CONFIG_MOTOR_SIM
+#include "sim/sim.h"
+
+/*
+ * Step the simulation model with the voltages the FOC just commanded.
+ * Call once per control tick, after motor_set_pwm().
+ *   vd, vq : d/q voltages from foc_ctx_t [V]
+ *   dt     : control period [s]  (typically FOC_CONTROL_DT)
+ */
+void motor_sim_update(float vd, float vq, float dt);
+
+/* Adjust simulated load torque at runtime. */
+void motor_sim_set_load(float T_load_nm);
+
+/* Read-only access to the internal sim state (for status reporting). */
+const sim_ctx_t *motor_sim_get_ctx(void);
+
+/* Override motor model parameters at runtime. */
+void motor_sim_set_params(float R, float L_H, float psi_Wb,
+                          float J_kgm2, float B_Nms);
+#endif /* CONFIG_MOTOR_SIM */

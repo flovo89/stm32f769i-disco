@@ -1,0 +1,2 @@
+# Load Sysbuild board Kconfig descriptions.
+osource "/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/boards/st/stm32f769i_disco/Kconfig.sysbuild"

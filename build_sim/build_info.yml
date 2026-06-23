@@ -1,0 +1,62 @@
+cmake:
+  application:
+    configuration-dir: '/home/flo/projects/stm32f769i-disco'
+    source-dir: '/home/flo/projects/stm32f769i-disco'
+  board:
+    name: 'stm32f769i_disco'
+    path:
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/boards/st/stm32f769i_disco'
+    qualifiers: 'stm32f769xx'
+    revision: ''
+  devicetree:
+    bindings-dirs:
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/bindings'
+    files:
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/boards/st/stm32f769i_disco/stm32f769i_disco.dts'
+     - '/home/flo/projects/stm32f769i-disco/boards/stm32f769i_disco.overlay'
+    include-dirs:
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/ambiq/dts'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/atmel/include'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/bouffalolab/include'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/bouffalolab/include/zephyr'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/gigadevice/include'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/microchip/include'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/microchip/dts'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/nuvoton/dts'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/nxp/dts'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/stm32/dts'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/modules/hal/ti/dts'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/include'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/include/zephyr'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/common'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/vendor'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/rx'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/x86'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/xtensa'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/sparc'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/riscv'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/posix'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/arm64'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/arm'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts/arc'
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/dts'
+    user-files:
+     - '/home/flo/projects/stm32f769i-disco/boards/stm32f769i_disco.overlay'
+  kconfig:
+    files:
+     - '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr/boards/st/stm32f769i_disco/stm32f769i_disco_defconfig'
+     - '/home/flo/projects/stm32f769i-disco/prj.conf'
+     - '/home/flo/projects/stm32f769i-disco/build_sim/zephyr/misc/generated/extra_kconfig_options.conf'
+    user-files:
+     - '/home/flo/projects/stm32f769i-disco/prj.conf'
+  toolchain:
+    name: 'zephyr'
+    path: '/home/flo/zephyr-sdk-1.0.1'
+  zephyr:
+    version: '4.4.99'
+    zephyr-base: '/home/flo/projects/stm32f769i-disco/zephyrproject/zephyr'
+version: '0.1.0'
+west:
+  command: '/home/flo/projects/stm32f769i-disco/venv/bin/west build -b stm32f769i_disco /home/flo/projects/stm32f769i-disco --build-dir /home/flo/projects/stm32f769i-disco/build_sim -- -DCONFIG_MOTOR_SIM=y'
+  topdir: '/home/flo/projects/stm32f769i-disco/zephyrproject'
+  version: '1.5.0'

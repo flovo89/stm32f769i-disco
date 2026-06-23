@@ -11,4 +11,8 @@ target_sources(app PRIVATE
     src/interface/cmd.c
 )
 
+if(CONFIG_MOTOR_SIM)
+    target_sources(app PRIVATE src/sim/sim.c)
+endif()
+
 target_include_directories(app PRIVATE src)

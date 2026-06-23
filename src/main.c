@@ -61,6 +61,10 @@ static void foc_thread_fn(void *p1, void *p2, void *p3)
 		motor_read_encoder(&theta, &omega);
 		foc_step(&g_foc, ia, ib, theta, omega);
 		motor_set_pwm(g_foc.da, g_foc.db, g_foc.dc);
+
+#ifdef CONFIG_MOTOR_SIM
+		motor_sim_update(g_foc.vd, g_foc.vq, FOC_CONTROL_DT);
+#endif
 	}
 }
 

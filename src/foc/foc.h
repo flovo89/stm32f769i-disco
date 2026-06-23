@@ -10,8 +10,16 @@
 #define FOC_PWM_HZ           20000      /* PWM switching frequency */
 
 #define FOC_POLE_PAIRS       7          /* Motor pole pair count */
-#define FOC_MAX_CURRENT_A    10.0f      /* Peak phase current limit [A] */
+#define FOC_MAX_CURRENT_A    10.0f      /* Overcurrent trip threshold [A] */
+#define FOC_MAX_TORQUE_A     8.0f       /* Speed PI output clamp [A] — must be
+                                         * < FOC_MAX_CURRENT_A so phase current
+                                         * transients don't trip overcurrent     */
 #define FOC_MAX_SPEED_RPM    3000.0f
+
+/* Motor electrical parameters for decoupling feedforward.
+ * Set to sim defaults; override via set_motor_params for real hardware. */
+#define FOC_MOTOR_L_H        1e-3f     /* Stator inductance [H] */
+#define FOC_MOTOR_PSI_WB     0.02f     /* PM flux linkage [Wb]  */
 
 /* Alignment: apply Id_align at theta=0 for align_ms */
 #define FOC_ALIGN_CURRENT_A  1.0f
@@ -65,6 +73,10 @@ typedef struct {
 	pid_ctrl_t pid_id;
 	pid_ctrl_t pid_iq;
 	pid_ctrl_t pid_speed;
+
+	/* Motor electrical params for decoupling feedforward */
+	float L_motor;   /* Stator inductance [H]  */
+	float psi_motor; /* PM flux linkage [Wb]   */
 
 	/* Alignment */
 	int   align_ticks_left;

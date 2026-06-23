@@ -95,17 +95,21 @@ void foc_init(foc_ctx_t *foc, float vbus_v)
 {
 	memset(foc, 0, sizeof(*foc));
 
-	foc->vbus  = vbus_v;
-	foc->state = FOC_STATE_IDLE;
-	foc->mode  = FOC_MODE_SPEED;
+	foc->vbus      = vbus_v;
+	foc->state     = FOC_STATE_IDLE;
+	foc->mode      = FOC_MODE_SPEED;
+	foc->L_motor   = FOC_MOTOR_L_H;
+	foc->psi_motor = FOC_MOTOR_PSI_WB;
 
 	/* Voltage limits: ±Vbus/√3 is the linear modulation limit */
 	float vlim = vbus_v / SQRT3;
 
 	pid_init(&foc->pid_id,    FOC_KP_CURRENT, FOC_KI_CURRENT, -vlim, vlim);
 	pid_init(&foc->pid_iq,    FOC_KP_CURRENT, FOC_KI_CURRENT, -vlim, vlim);
+	/* Speed PI is clamped below the overcurrent threshold so that phase
+	 * current transients don't trip the overcurrent check.              */
 	pid_init(&foc->pid_speed, FOC_KP_SPEED,   FOC_KI_SPEED,
-	         -FOC_MAX_CURRENT_A, FOC_MAX_CURRENT_A);
+	         -FOC_MAX_TORQUE_A, FOC_MAX_TORQUE_A);
 }
 
 void foc_reset(foc_ctx_t *foc)
@@ -198,9 +202,11 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 	foc->vd = pid_update(&foc->pid_id, foc->id_ref - foc->id, FOC_CONTROL_DT);
 	foc->vq = pid_update(&foc->pid_iq, foc->iq_ref - foc->iq, FOC_CONTROL_DT);
 
-	/* ── Feed-forward decoupling (back-EMF compensation) ── */
-	foc->vd -= foc->omega_e * foc->pid_iq.kp * foc->iq;
-	foc->vq += foc->omega_e * foc->pid_id.kp * foc->id;
+	/* ── Feed-forward decoupling (cross-coupling + back-EMF) ──
+	 *   vd_ff = -ω_e · L · iq
+	 *   vq_ff = +ω_e · (L · id + ψ_m)                          */
+	foc->vd -= foc->omega_e * foc->L_motor * foc->iq;
+	foc->vq += foc->omega_e * (foc->L_motor * foc->id + foc->psi_motor);
 
 	/* ── Inverse Park + SVPWM ── */
 	foc_inv_park(foc->vd, foc->vq, foc->theta_e, &foc->valpha, &foc->vbeta);
