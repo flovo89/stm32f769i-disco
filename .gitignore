@@ -1,0 +1,26 @@
+# Build output
+build/
+
+# Zephyr workspace (fetched by west, not part of this repo)
+zephyrproject/
+
+# Python virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# West internal state
+.west/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store

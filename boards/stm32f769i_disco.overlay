@@ -1,0 +1,124 @@
+/*
+ * Board overlay — BLDC FOC motor control shield
+ *
+ * Pin mapping:
+ *   PA6  → ADC1 CH6  — Phase A current sense
+ *   PC2  → ADC1 CH12 — Phase B current sense
+ *   PC8  → TIM3 CH3  — Phase A PWM
+ *   PH6  → TIM12 CH1 — Phase B PWM
+ *   PF7  → TIM11 CH1 — Phase C PWM
+ *   PF6  → GPIO EXTI — Encoder signal A
+ *   PJ1  → GPIO EXTI — Encoder signal B
+ *   PJ0  → GPIO EXTI — Encoder index (Z)
+ *   PJ14 → GPIO OUT  — Motor driver enable (active-high)
+ *
+ * NOTE: Verify pinctrl node names against your Zephyr version's
+ * dts/arm/st/f7/stm32f769ig-pinctrl.dtsi before building.
+ */
+
+/* ─── Current sensing ────────────────────────────────────────────────────── */
+&adc1 {
+	pinctrl-0 = <&adc1_in6_pa6 &adc1_in12_pc2>;
+	pinctrl-names = "default";
+	st,adc-clock-source = "SYNC";
+	st,adc-prescaler = <4>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	/* Phase A — PA6 */
+	channel@6 {
+		reg = <6>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 15)>;
+		zephyr,resolution = <12>;
+	};
+
+	/* Phase B — PC2 */
+	channel@c {
+		reg = <12>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 15)>;
+		zephyr,resolution = <12>;
+	};
+};
+
+/* ─── Phase A PWM — PC8 / TIM3 CH3 ─────────────────────────────────────── */
+&timers3 {
+	status = "okay";
+	st,prescaler = <0>;  /* No prescaler — use full APB1 clock */
+
+	pwm_phase_a: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim3_ch3_pc8>;
+		pinctrl-names = "default";
+	};
+};
+
+/* ─── Phase B PWM — PH6 / TIM12 CH1 ────────────────────────────────────── */
+&timers12 {
+	status = "okay";
+	st,prescaler = <0>;
+
+	pwm_phase_b: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim12_ch1_ph6>;
+		pinctrl-names = "default";
+	};
+};
+
+/* ─── Phase C PWM — PF7 / TIM11 CH1 ────────────────────────────────────── */
+&timers11 {
+	status = "okay";
+	st,prescaler = <0>;
+
+	pwm_phase_c: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim11_ch1_pf7>;
+		pinctrl-names = "default";
+	};
+};
+
+/* ─── Motor enable + encoder GPIOs ─────────────────────────────────────── */
+/ {
+	motor_gpios {
+		compatible = "gpio-leds";  /* Reuse binding; we just need GPIO nodes */
+
+		motor_en: motor_en {
+			gpios = <&gpioj 14 GPIO_ACTIVE_HIGH>;
+			label = "Motor driver enable";
+		};
+	};
+
+	encoder {
+		compatible = "gpio-keys";
+
+		enc_a: enc_a {
+			gpios = <&gpiof 6 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+			label = "Encoder A";
+		};
+
+		enc_b: enc_b {
+			gpios = <&gpioj 1 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+			label = "Encoder B";
+		};
+
+		enc_z: enc_z {
+			gpios = <&gpioj 0 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+			label = "Encoder Index";
+		};
+	};
+};
+
+/* Shell runs over USART1 (already the board's chosen zephyr,shell-uart).
+ * Connect via the ST-Link VCP at 115200 baud. */
+
+/* ─── Hardware RNG (required by networking stack) ────────────────────────── */
+&rng {
+	status = "okay";
+};
+
+/* Ethernet is fully configured in the board's base DTS (stm32f769i_disco.dts).
+ * No overlay needed — the LAN8742A PHY node and pinctrl are already there. */
