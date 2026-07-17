@@ -112,7 +112,8 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 		         "STATE=%s MODE=%s SPEED=%.1f SPEED_REF=%.1f "
 		         "IA=%.3f IB=%.3f ID=%.3f IQ=%.3f IQ_REF=%.3f "
 		         "TORQUE=%.4f TORQUE_REF=%.4f "
-		         "THETA_E=%.3f VBUS=%.1f OC=%u LOOPS=%u"
+		         "THETA_E=%.3f VBUS=%.1f OC=%u "
+		         "DA=%.3f DB=%.3f DC=%.3f LOOPS=%u"
 #ifdef CONFIG_MOTOR_SIM
 		         " SIM=1"
 #endif
@@ -129,6 +130,7 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 		         (double)g_foc.theta_e,
 		         (double)g_foc.vbus,
 		         g_foc.overcurrent_count,
+		         (double)g_foc.da, (double)g_foc.db, (double)g_foc.dc,
 		         g_foc.loop_count);
 
 #ifdef CONFIG_MOTOR_SIM

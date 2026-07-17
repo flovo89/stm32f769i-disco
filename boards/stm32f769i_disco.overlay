@@ -7,10 +7,9 @@
  *   PC8  → TIM3 CH3  — Phase A PWM
  *   PH6  → TIM12 CH1 — Phase B PWM
  *   PF7  → TIM11 CH1 — Phase C PWM
- *   PF6  → GPIO EXTI — Encoder signal A
- *   PJ1  → GPIO EXTI — Encoder signal B
- *   PJ0  → GPIO EXTI — Encoder index (Z)
- *   PJ14 → GPIO OUT  — Motor driver enable (active-high)
+ *   PC6  → TIM8 CH1  — Encoder signal A (Arduino D1)
+ *   PC7  → TIM8 CH2  — Encoder signal B (Arduino D0)
+ *   PJ4  → GPIO OUT  — Motor driver enable (active-high)
  *
  * NOTE: Verify pinctrl node names against your Zephyr version's
  * dts/arm/st/f7/stm32f769ig-pinctrl.dtsi before building.
@@ -81,34 +80,46 @@
 	};
 };
 
-/* ─── Motor enable + encoder GPIOs ─────────────────────────────────────── */
+/* ─── Motor enable GPIO ─────────────────────────────────────────────────── */
 / {
 	motor_gpios {
 		compatible = "gpio-leds";  /* Reuse binding; we just need GPIO nodes */
 
 		motor_en: motor_en {
-			gpios = <&gpioj 14 GPIO_ACTIVE_HIGH>;
+			gpios = <&gpioj 4 GPIO_ACTIVE_HIGH>;
 			label = "Motor driver enable";
 		};
 	};
+};
 
-	encoder {
-		compatible = "gpio-keys";
+/* PC6/PC7 are the Arduino D1/D0 serial pins (USART6 in the board DTS).
+ * Disable USART6 so it does not reconfigure the pins away from TIM8 AF. */
+&usart6 {
+	status = "disabled";
+};
 
-		enc_a: enc_a {
-			gpios = <&gpiof 6 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
-			label = "Encoder A";
-		};
+/* ─── TIM8 hardware encoder interface — PC6 (D1) / PC7 (D0) ─────────────── */
 
-		enc_b: enc_b {
-			gpios = <&gpioj 1 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
-			label = "Encoder B";
-		};
+/* Pull-ups required for open-collector encoder outputs. */
+&tim8_ch1_pc6 {
+	bias-pull-up;
+};
+&tim8_ch2_pc7 {
+	bias-pull-up;
+};
 
-		enc_z: enc_z {
-			gpios = <&gpioj 0 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
-			label = "Encoder Index";
-		};
+&timers8 {
+	status = "okay";
+	st,prescaler = <0>;
+
+	qdec0: qdec {
+		compatible = "st,stm32-qdec";
+		pinctrl-0 = <&tim8_ch1_pc6 &tim8_ch2_pc7>;
+		pinctrl-names = "default";
+		st,counts-per-revolution = <4096>;
+		st,encoder-mode = <3>;         /* X4_TI12: count all edges on both channels */
+		st,input-filter-level = <2>;   /* Fs=F_clk, N=4 → rejects glitches < 4 cycles */
+		status = "okay";
 	};
 };
 

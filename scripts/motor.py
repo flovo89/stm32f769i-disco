@@ -195,11 +195,12 @@ def cmd_plot(b, args):
     ib         = deque(maxlen=WINDOW)
     torque     = deque(maxlen=WINDOW)
     torque_ref = deque(maxlen=WINDOW)
+    theta_e    = deque(maxlen=WINDOW)
 
     t0 = time.time()
-    sim_mode = [False]   # updated on first status response
+    sim_mode = [False]
 
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
     title_base = f"BLDC FOC — {b._addr[0]}"
     fig.suptitle(title_base)
 
@@ -223,9 +224,17 @@ def cmd_plot(b, args):
     ln_torque_ref, = ax3.plot([], [], label="Torque ref (N·m)", color="tab:purple",
                               linestyle="--", alpha=0.5)
     ax3.set_ylabel("Torque [N·m]")
-    ax3.set_xlabel("Time [s]")
     ax3.legend(loc="upper left")
     ax3.grid(True, alpha=0.3)
+
+    ln_theta_e, = ax4.plot([], [], label="θ_e (rad)", color="tab:cyan")
+    ax4.axhline(3.14159, color="gray", linestyle=":", linewidth=0.8, alpha=0.6)
+    ax4.axhline(6.28318, color="gray", linestyle=":", linewidth=0.8, alpha=0.6)
+    ax4.set_ylabel("θ_e [rad]")
+    ax4.set_ylim(-0.1, 6.4)
+    ax4.set_xlabel("Time [s]")
+    ax4.legend(loc="upper left")
+    ax4.grid(True, alpha=0.3)
 
     state_text = ax1.text(0.01, 0.95, "", transform=ax1.transAxes,
                           fontsize=9, verticalalignment="top",
@@ -234,8 +243,8 @@ def cmd_plot(b, args):
     def _update(_frame):
         s = b.status()
         if not s:
-            return ln_speed, ln_spd_ref, ln_iq, ln_iq_ref, ln_ia, ln_ib, \
-                   ln_torque, ln_torque_ref
+            return (ln_speed, ln_spd_ref, ln_iq, ln_iq_ref, ln_ia, ln_ib,
+                    ln_torque, ln_torque_ref, ln_theta_e)
 
         if _is_sim(s) and not sim_mode[0]:
             sim_mode[0] = True
@@ -251,6 +260,7 @@ def cmd_plot(b, args):
         ib.append(s.get("IB", 0))
         torque.append(s.get("TORQUE", 0))
         torque_ref.append(s.get("TORQUE_REF", 0))
+        theta_e.append(s.get("THETA_E", 0))
 
         td = list(t_data)
         ln_speed.set_data(td, list(speed))
@@ -261,14 +271,17 @@ def cmd_plot(b, args):
         ln_ib.set_data(td, list(ib))
         ln_torque.set_data(td, list(torque))
         ln_torque_ref.set_data(td, list(torque_ref))
+        ln_theta_e.set_data(td, list(theta_e))
 
         for ax in (ax1, ax2, ax3):
             ax.relim()
             ax.autoscale_view()
+        ax4.relim()
+        ax4.autoscale_view(scaley=False)  # keep fixed [0, 2π] range
 
         state_text.set_text(f"State: {s.get('STATE','?')}  OC: {int(s.get('OC',0))}")
-        return ln_speed, ln_spd_ref, ln_iq, ln_iq_ref, ln_ia, ln_ib, \
-               ln_torque, ln_torque_ref
+        return (ln_speed, ln_spd_ref, ln_iq, ln_iq_ref, ln_ia, ln_ib,
+                ln_torque, ln_torque_ref, ln_theta_e)
 
     ani = animation.FuncAnimation(fig, _update, interval=interval_ms,
                                   blit=False, cache_frame_data=False)

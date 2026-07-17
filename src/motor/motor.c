@@ -4,6 +4,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/logging/log.h>
 
 #ifdef CONFIG_MOTOR_SIM
@@ -18,11 +19,11 @@ LOG_MODULE_REGISTER(motor, LOG_LEVEL_INF);
 /* ─── Device tree handles ────────────────────────────────────────────────── */
 
 #ifndef CONFIG_MOTOR_SIM
-static const struct device *adc_dev = DEVICE_DT_GET(DT_NODELABEL(adc1));
+static const struct device *adc_dev  = DEVICE_DT_GET(DT_NODELABEL(adc1));
+static const struct device *qdec_dev = DEVICE_DT_GET(DT_NODELABEL(qdec0));
+static const struct device *gpiof_dev = DEVICE_DT_GET(DT_NODELABEL(gpiof));
 #endif
 
-/* PWM_DT_SPEC_GET is consumer-side API (needs a 'pwms' property).
- * We access the PWM devices directly by label and supply channel numbers. */
 static const struct device *pwm_a_dev =
 	DEVICE_DT_GET(DT_NODELABEL(pwm_phase_a));
 static const struct device *pwm_b_dev =
@@ -36,15 +37,6 @@ static const struct device *pwm_c_dev =
 
 static const struct gpio_dt_spec motor_en_gpio =
 	GPIO_DT_SPEC_GET(DT_PATH(motor_gpios, motor_en), gpios);
-
-#ifndef CONFIG_MOTOR_SIM
-static const struct gpio_dt_spec enc_a_gpio =
-	GPIO_DT_SPEC_GET(DT_PATH(encoder, enc_a), gpios);
-static const struct gpio_dt_spec enc_b_gpio =
-	GPIO_DT_SPEC_GET(DT_PATH(encoder, enc_b), gpios);
-static const struct gpio_dt_spec enc_z_gpio =
-	GPIO_DT_SPEC_GET(DT_PATH(encoder, enc_z), gpios);
-#endif
 
 /* ─── ADC configuration (real hardware only) ─────────────────────────────── */
 
@@ -66,72 +58,51 @@ static struct adc_channel_cfg adc_ch12_cfg = {
 	.differential     = 0,
 };
 
-static int16_t adc_buf[2];
+static int16_t adc_raw_a;
+static int16_t adc_raw_b;
 
-static const struct adc_sequence adc_seq = {
-	.channels    = BIT(6) | BIT(12),
-	.buffer      = adc_buf,
-	.buffer_size = sizeof(adc_buf),
+/* Read channels one at a time — multi-channel sequences block forever on
+ * STM32F7 without DMA because the EOS interrupt never fires.
+ * Must be non-const (RAM) — the STM32 ADC driver writes into the struct. */
+static struct adc_sequence adc_seq_a = {
+	.channels    = BIT(6),
+	.buffer      = &adc_raw_a,
+	.buffer_size = sizeof(adc_raw_a),
+	.resolution  = 12,
+};
+
+static struct adc_sequence adc_seq_b = {
+	.channels    = BIT(12),
+	.buffer      = &adc_raw_b,
+	.buffer_size = sizeof(adc_raw_b),
 	.resolution  = 12,
 };
 
 #endif /* CONFIG_MOTOR_SIM */
 
-/* ─── Encoder state and current offsets (real hardware only) ─────────────── */
+/* ─── Encoder state (real hardware only) ─────────────────────────────────── */
 
 #ifndef CONFIG_MOTOR_SIM
 
-static atomic_t enc_count = ATOMIC_INIT(0);
-static volatile int32_t enc_count_prev;
-static volatile int64_t enc_time_prev_us;
+#define CPR4    (MOTOR_ENCODER_CPR * 4)   /* 4096 counts/rev */
+#define TWO_PI  6.28318530717959f
 
-static struct gpio_callback enc_a_cb;
-static struct gpio_callback enc_b_cb;
-static struct gpio_callback enc_z_cb;
+/* The Zephyr QDEC driver sets ARR = UINT16_MAX - (UINT16_MAX % CPR4) - 1 = 61439
+ * for a 16-bit timer.  The counter rolls over at 61440, not CPR4. */
+#define QDEC_PERIOD  (UINT16_MAX - (UINT16_MAX % CPR4))  /* 61440 */
 
-static void enc_a_isr(const struct device *dev,
-                       struct gpio_callback *cb, uint32_t pins)
-{
-	ARG_UNUSED(dev);
-	ARG_UNUSED(cb);
-	ARG_UNUSED(pins);
+/* Software position zero — set by motor_reset_encoder() */
+static int32_t enc_offset;
 
-	int a = gpio_pin_get_dt(&enc_a_gpio);
-	int b = gpio_pin_get_dt(&enc_b_gpio);
+/* Windowed velocity estimator — update omega every OMEGA_WINDOW ticks.
+ * Per-tick (300 µs) instantaneous delta is 0 or 1 count at low speed;
+ * a ~10 ms window accumulates enough counts for usable resolution. */
+#define OMEGA_WINDOW 32
 
-	/* Standard 4× quadrature decode table */
-	if (a)  { atomic_add(&enc_count, b ? -1 : 1); }
-	else    { atomic_add(&enc_count, b ?  1 : -1); }
-}
-
-static void enc_b_isr(const struct device *dev,
-                       struct gpio_callback *cb, uint32_t pins)
-{
-	ARG_UNUSED(dev);
-	ARG_UNUSED(cb);
-	ARG_UNUSED(pins);
-
-	int a = gpio_pin_get_dt(&enc_a_gpio);
-	int b = gpio_pin_get_dt(&enc_b_gpio);
-
-	if (b)  { atomic_add(&enc_count, a ? 1 : -1); }
-	else    { atomic_add(&enc_count, a ? -1 : 1); }
-}
-
-static void enc_z_isr(const struct device *dev,
-                       struct gpio_callback *cb, uint32_t pins)
-{
-	ARG_UNUSED(dev);
-	ARG_UNUSED(cb);
-	ARG_UNUSED(pins);
-
-	/* Index pulse: snap count to nearest multiple of CPR×4 */
-	int32_t cpr4 = MOTOR_ENCODER_CPR * 4;
-	int32_t c    = (int32_t)atomic_get(&enc_count);
-	int32_t rem  = c % cpr4;
-
-	atomic_set(&enc_count, c - rem);
-}
+static uint32_t omega_tick;
+static int32_t  omega_raw_base;
+static int64_t  omega_time_base;
+static float    omega_hold;
 
 static int16_t cal_offset_ch6  = 2048;
 static int16_t cal_offset_ch12 = 2048;
@@ -163,6 +134,19 @@ int motor_init(void)
 
 	ret = adc_channel_setup(adc_dev, &adc_ch12_cfg);
 	if (ret) { LOG_ERR("ADC ch12 setup: %d", ret); return ret; }
+
+	/* --- QDEC (TIM8 hardware encoder interface) --- */
+	if (!device_is_ready(qdec_dev)) {
+		LOG_ERR("QDEC not ready");
+		return -ENODEV;
+	}
+
+	/* Float the former encoder GPIO pins — previously had pull-ups via the
+	 * old gpio-keys overlay node.  Configure as plain inputs (no pull) so
+	 * they sit at high-Z and don't interfere with whatever is wired to them. */
+	gpio_pin_configure(gpiof_dev, 6, GPIO_INPUT);         /* old enc_a PF6/D3 */
+	gpio_pin_configure(motor_en_gpio.port, 1, GPIO_INPUT); /* old enc_b PJ1/D2 */
+	gpio_pin_configure(motor_en_gpio.port, 0, GPIO_INPUT); /* old enc_z PJ0/D4 */
 #endif /* CONFIG_MOTOR_SIM */
 
 	/* --- PWM (always active — oscilloscope verification in sim mode) --- */
@@ -178,40 +162,12 @@ int motor_init(void)
 	pwm_set(pwm_b_dev, PWM_CH_B, PWM_PERIOD_NS, half, PWM_POLARITY_NORMAL);
 	pwm_set(pwm_c_dev, PWM_CH_C, PWM_PERIOD_NS, half, PWM_POLARITY_NORMAL);
 
-	/* --- Motor enable GPIO (always active) --- */
+	/* --- Motor enable GPIO --- */
 	if (!gpio_is_ready_dt(&motor_en_gpio)) {
 		LOG_ERR("Motor enable GPIO not ready");
 		return -ENODEV;
 	}
 	gpio_pin_configure_dt(&motor_en_gpio, GPIO_OUTPUT_INACTIVE);
-
-#ifndef CONFIG_MOTOR_SIM
-	/* --- Encoder GPIOs --- */
-	if (!gpio_is_ready_dt(&enc_a_gpio) ||
-	    !gpio_is_ready_dt(&enc_b_gpio) ||
-	    !gpio_is_ready_dt(&enc_z_gpio)) {
-		LOG_ERR("Encoder GPIOs not ready");
-		return -ENODEV;
-	}
-
-	gpio_pin_configure_dt(&enc_a_gpio, GPIO_INPUT);
-	gpio_pin_configure_dt(&enc_b_gpio, GPIO_INPUT);
-	gpio_pin_configure_dt(&enc_z_gpio, GPIO_INPUT);
-
-	gpio_init_callback(&enc_a_cb, enc_a_isr, BIT(enc_a_gpio.pin));
-	gpio_init_callback(&enc_b_cb, enc_b_isr, BIT(enc_b_gpio.pin));
-	gpio_init_callback(&enc_z_cb, enc_z_isr, BIT(enc_z_gpio.pin));
-
-	gpio_add_callback(enc_a_gpio.port, &enc_a_cb);
-	gpio_add_callback(enc_b_gpio.port, &enc_b_cb);
-	gpio_add_callback(enc_z_gpio.port, &enc_z_cb);
-
-	gpio_pin_interrupt_configure_dt(&enc_a_gpio, GPIO_INT_EDGE_BOTH);
-	gpio_pin_interrupt_configure_dt(&enc_b_gpio, GPIO_INT_EDGE_BOTH);
-	gpio_pin_interrupt_configure_dt(&enc_z_gpio, GPIO_INT_EDGE_RISING);
-
-	enc_time_prev_us = k_uptime_get() * 1000LL;
-#endif /* CONFIG_MOTOR_SIM */
 
 	LOG_INF("Motor hardware initialised");
 	return 0;
@@ -237,16 +193,15 @@ int motor_read_currents(float *ia, float *ib)
 	sim_get_currents(&g_sim, ia, ib);
 	return 0;
 #else
-	struct adc_sequence seq = adc_seq;  /* local copy so we can re-read */
-	int ret = adc_read(adc_dev, &seq);
+	int ret = adc_read(adc_dev, &adc_seq_a);
 
-	if (ret) {
-		LOG_ERR("ADC read error: %d", ret);
-		return ret;
-	}
+	if (ret) { LOG_ERR("ADC ch6 read: %d", ret); return ret; }
 
-	*ia = (adc_buf[0] - cal_offset_ch6)  * MOTOR_CURRENT_SCALE;
-	*ib = (adc_buf[1] - cal_offset_ch12) * MOTOR_CURRENT_SCALE;
+	ret = adc_read(adc_dev, &adc_seq_b);
+	if (ret) { LOG_ERR("ADC ch12 read: %d", ret); return ret; }
+
+	*ia = (adc_raw_a - cal_offset_ch6)  * MOTOR_CURRENT_SCALE;
+	*ib = (adc_raw_b - cal_offset_ch12) * MOTOR_CURRENT_SCALE;
 
 	return 0;
 #endif
@@ -260,14 +215,16 @@ int motor_calibrate_currents(void)
 #else
 	int32_t sum_a = 0, sum_b = 0;
 	const int N = 64;
-	struct adc_sequence seq = adc_seq;
 
 	for (int i = 0; i < N; i++) {
-		int ret = adc_read(adc_dev, &seq);
+		int ret = adc_read(adc_dev, &adc_seq_a);
 
 		if (ret) { return ret; }
-		sum_a += adc_buf[0];
-		sum_b += adc_buf[1];
+
+		ret = adc_read(adc_dev, &adc_seq_b);
+		if (ret) { return ret; }
+		sum_a += adc_raw_a;
+		sum_b += adc_raw_b;
 	}
 
 	cal_offset_ch6  = (int16_t)(sum_a / N);
@@ -286,9 +243,17 @@ void motor_reset_encoder(void)
 #ifdef CONFIG_MOTOR_SIM
 	sim_reset(&g_sim);
 #else
-	atomic_set(&enc_count, 0);
-	enc_count_prev   = 0;
-	enc_time_prev_us = k_uptime_get() * 1000LL;
+	struct sensor_value val;
+
+	sensor_sample_fetch(qdec_dev);
+	sensor_channel_get(qdec_dev, SENSOR_CHAN_ENCODER_COUNT, &val);
+	enc_offset = (int32_t)val.val1;
+
+	/* Reset velocity window to avoid a spike on the next read */
+	omega_tick      = 0;
+	omega_raw_base  = enc_offset;
+	omega_time_base = k_uptime_get() * 1000LL;
+	omega_hold      = 0.0f;
 #endif
 }
 
@@ -298,34 +263,48 @@ float motor_read_encoder(float *theta_rad, float *omega_rad_s)
 	sim_get_encoder(&g_sim, theta_rad, omega_rad_s);
 	return sim_get_speed_rpm(&g_sim);
 #else
-	static const float CPR4   = MOTOR_ENCODER_CPR * 4.0f;
-	static const float TWO_PI = 6.28318530717959f;
+	struct sensor_value val;
 
-	int32_t count = (int32_t)atomic_get(&enc_count);
+	sensor_sample_fetch(qdec_dev);
+	sensor_channel_get(qdec_dev, SENSOR_CHAN_ENCODER_COUNT, &val);
+
+	int32_t raw    = (int32_t)val.val1;
 	int64_t now_us = k_uptime_get() * 1000LL;
 
-	int32_t pos_mod = count % (int32_t)(CPR4);
+	/* Position: signed movement from enc_offset, corrected for the 61440-period
+	 * QDEC counter rollover, then wrapped into [0, CPR4). */
+	int32_t pos_delta = raw - enc_offset;
 
-	if (pos_mod < 0) { pos_mod += (int32_t)CPR4; }
+	if (pos_delta >  (int32_t)(QDEC_PERIOD / 2)) { pos_delta -= QDEC_PERIOD; }
+	if (pos_delta < -(int32_t)(QDEC_PERIOD / 2)) { pos_delta += QDEC_PERIOD; }
 
-	*theta_rad = (float)pos_mod * TWO_PI / CPR4;
+	int32_t pos = ((pos_delta % CPR4) + CPR4) % CPR4;
 
-	int64_t dt_us = now_us - enc_time_prev_us;
-	float   dt    = (float)dt_us * 1e-6f;
-	float   omega = 0.0f;
+	*theta_rad = (float)pos * TWO_PI / (float)CPR4;
 
-	if (dt > 0.0001f) {
-		int32_t delta = count - enc_count_prev;
+	/* Velocity: windowed estimator with QDEC-period-correct wraparound */
+	if (++omega_tick >= OMEGA_WINDOW) {
+		omega_tick = 0;
 
-		omega = (float)delta * TWO_PI / CPR4 / dt;
+		int32_t delta = raw - omega_raw_base;
+
+		if (delta >  (int32_t)(QDEC_PERIOD / 2)) { delta -= QDEC_PERIOD; }
+		if (delta < -(int32_t)(QDEC_PERIOD / 2)) { delta += QDEC_PERIOD; }
+
+		int64_t dt_us = now_us - omega_time_base;
+
+		if (dt_us > 1000) {
+			omega_hold = (float)delta * TWO_PI / (float)CPR4
+			             / ((float)dt_us * 1e-6f);
+		}
+
+		omega_raw_base  = raw;
+		omega_time_base = now_us;
 	}
 
-	enc_count_prev   = count;
-	enc_time_prev_us = now_us;
+	*omega_rad_s = omega_hold;
 
-	*omega_rad_s = omega;
-
-	return omega * (60.0f / TWO_PI);
+	return omega_hold * (60.0f / TWO_PI);
 #endif
 }
 

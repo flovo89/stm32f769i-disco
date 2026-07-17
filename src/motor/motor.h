@@ -12,7 +12,7 @@
  * Offset: 2048 LSB = zero current (mid-rail)
  */
 #define MOTOR_SHUNT_OHM    0.01f   /* 10 mΩ */
-#define MOTOR_AMP_GAIN     20.0f   /* ×20   */
+#define MOTOR_AMP_GAIN     50.0f   /* ×50   */
 #define MOTOR_ADC_VREF_V   3.3f
 #define MOTOR_ADC_BITS     12
 #define MOTOR_ADC_COUNTS   (1 << MOTOR_ADC_BITS)
@@ -24,7 +24,7 @@
 #define MOTOR_ENCODER_CPR  1024   /* Lines per revolution (×4 for quadrature) */
 
 /* DC bus voltage (no bus-voltage sense pin in this hardware setup) */
-#define MOTOR_VBUS_V       24.0f
+#define MOTOR_VBUS_V       18.0f
 
 int  motor_init(void);
 
