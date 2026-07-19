@@ -65,10 +65,9 @@ static void foc_thread_fn(void *p1, void *p2, void *p3)
 #ifdef CONFIG_MOTOR_SIM
 		motor_sim_update(g_foc.vd, g_foc.vq, FOC_CONTROL_DT);
 #endif
-		/* Each adc_read takes ~66 µs; two reads push the loop past the
-		 * 100 µs timer period, so foc_sem is always ready and the
-		 * cooperative thread never blocks.  One explicit tick of sleep
-		 * lets the shell and networking threads run each iteration.    */
+		/* FOC thread is cooperative (priority -2) and cannot be
+		 * preempted by the shell/UDP threads (preemptive, priority 5).
+		 * Sleep for one system tick so lower-priority threads get CPU. */
 		k_sleep(K_TICKS(1));
 	}
 }

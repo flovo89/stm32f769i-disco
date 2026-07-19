@@ -102,10 +102,10 @@ void foc_init(foc_ctx_t *foc, float vbus_v)
 	foc->psi_motor = FOC_MOTOR_PSI_WB;
 
 	/* Voltage limits: ±Vbus/√3 is the linear modulation limit */
-	float vlim = vbus_v / SQRT3;
+	foc->vlim = vbus_v / SQRT3;
 
-	pid_init(&foc->pid_id,    FOC_KP_CURRENT, FOC_KI_CURRENT, -vlim, vlim);
-	pid_init(&foc->pid_iq,    FOC_KP_CURRENT, FOC_KI_CURRENT, -vlim, vlim);
+	pid_init(&foc->pid_id,    FOC_KP_CURRENT, FOC_KI_CURRENT, -foc->vlim, foc->vlim);
+	pid_init(&foc->pid_iq,    FOC_KP_CURRENT, FOC_KI_CURRENT, -foc->vlim, foc->vlim);
 	/* Speed PI is clamped below the overcurrent threshold so that phase
 	 * current transients don't trip the overcurrent check.              */
 	pid_init(&foc->pid_speed, FOC_KP_SPEED,   FOC_KI_SPEED,
@@ -151,9 +151,11 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 	case FOC_STATE_ALIGNING: {
 		float align_angle = 0.0f;  /* Drive d-axis to 0 rad */
 		float valpha, vbeta;
+		float vd_align = FOC_ALIGN_CURRENT_A * foc->pid_id.kp;
 
-		foc_inv_park(FOC_ALIGN_CURRENT_A * foc->pid_id.kp, 0.0f,
-		             align_angle, &valpha, &vbeta);
+		if (vd_align > foc->vlim) { vd_align = foc->vlim; }
+
+		foc_inv_park(vd_align, 0.0f, align_angle, &valpha, &vbeta);
 		foc_svpwm(valpha, vbeta, foc->vbus,
 		          &foc->da, &foc->db, &foc->dc);
 
@@ -166,6 +168,17 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 		}
 		return;
 	}
+
+	/* ── FORCED: hold da/db/dc as set externally — diagnostics only ── */
+	case FOC_STATE_FORCED:
+		if (fabsf(ia) > FOC_MAX_CURRENT_A || fabsf(ib) > FOC_MAX_CURRENT_A) {
+			foc->overcurrent_count++;
+			foc->state = FOC_STATE_ERROR;
+			foc->da = foc->db = foc->dc = 0.5f;
+			LOG_ERR("Overcurrent in forced mode: ia=%.2f ib=%.2f",
+			        (double)ia, (double)ib);
+		}
+		return;
 
 	/* ── ERROR: output zero voltage ── */
 	case FOC_STATE_ERROR:
@@ -207,6 +220,18 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 	 *   vq_ff = +ω_e · (L · id + ψ_m)                          */
 	foc->vd -= foc->omega_e * foc->L_motor * foc->iq;
 	foc->vq += foc->omega_e * (foc->L_motor * foc->id + foc->psi_motor);
+
+	/* ── Hard voltage clamp (PI + feedforward combined) ──
+	 * Limits peak phase current regardless of feedforward accuracy.
+	 * Clamps voltage vector magnitude, preserving direction. */
+	float vmag = sqrtf(foc->vd * foc->vd + foc->vq * foc->vq);
+
+	if (vmag > foc->vlim && vmag > 0.0f) {
+		float scale = foc->vlim / vmag;
+
+		foc->vd *= scale;
+		foc->vq *= scale;
+	}
 
 	/* ── Inverse Park + SVPWM ── */
 	foc_inv_park(foc->vd, foc->vq, foc->theta_e, &foc->valpha, &foc->vbeta);
@@ -271,12 +296,33 @@ void foc_tune_speed_pid(foc_ctx_t *foc, float kp, float ki)
 	         -FOC_MAX_CURRENT_A, FOC_MAX_CURRENT_A);
 }
 
+void foc_set_vlim(foc_ctx_t *foc, float vlim_v)
+{
+	float full = foc->vbus / SQRT3;
+
+	if (vlim_v <= 0.0f || vlim_v > full) {
+		vlim_v = full;
+	}
+	foc->vlim = vlim_v;
+	pid_init(&foc->pid_id, foc->pid_id.kp, foc->pid_id.ki, -vlim_v, vlim_v);
+	pid_init(&foc->pid_iq, foc->pid_iq.kp, foc->pid_iq.ki, -vlim_v, vlim_v);
+}
+
+void foc_set_forced_duty(foc_ctx_t *foc, float da, float db, float dc)
+{
+	foc->da    = da;
+	foc->db    = db;
+	foc->dc    = dc;
+	foc->state = FOC_STATE_FORCED;
+}
+
 const char *foc_state_str(foc_state_t s)
 {
 	switch (s) {
 	case FOC_STATE_IDLE:      return "IDLE";
 	case FOC_STATE_ALIGNING:  return "ALIGNING";
 	case FOC_STATE_RUNNING:   return "RUNNING";
+	case FOC_STATE_FORCED:    return "FORCED";
 	case FOC_STATE_ERROR:     return "ERROR";
 	default:                  return "UNKNOWN";
 	}

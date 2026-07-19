@@ -129,6 +129,13 @@ def cmd_tune(b, args):
     else:
         print(f"Unknown loop '{args.loop}'. Use 'current' or 'speed'.")
 
+def cmd_vmax(b, args):
+    print(b.send(f"set_vmax {args.volts}"))
+
+def cmd_mosfet_test(b, _args):
+    """Send mosfet_test over UDP — gets compact summary (multi-line output requires shell)."""
+    print(b.send("mosfet_test"))
+
 
 def cmd_monitor(b, args):
     interval = args.interval
@@ -329,20 +336,27 @@ def main():
     p.add_argument("kp", type=float)
     p.add_argument("ki", type=float)
 
+    p = sub.add_parser("vmax", help="Limit output voltage [V] (0 = full Vbus/sqrt3)")
+    p.add_argument("volts", type=float)
+
+    sub.add_parser("mosfet_test", help="Test all 6 MOSFETs (use shell for full output)")
+
     args = parser.parse_args()
 
     b = Board(host=args.host, port=args.port)
 
     dispatch = {
-        "enable":    cmd_enable,
-        "disable":   cmd_disable,
-        "speed":     cmd_speed,
-        "torque":    cmd_torque,
-        "status":    cmd_status,
-        "calibrate": cmd_calibrate,
-        "monitor":   cmd_monitor,
-        "plot":      cmd_plot,
-        "tune":      cmd_tune,
+        "enable":      cmd_enable,
+        "disable":     cmd_disable,
+        "speed":       cmd_speed,
+        "torque":      cmd_torque,
+        "status":      cmd_status,
+        "calibrate":   cmd_calibrate,
+        "monitor":     cmd_monitor,
+        "plot":        cmd_plot,
+        "tune":        cmd_tune,
+        "vmax":        cmd_vmax,
+        "mosfet_test": cmd_mosfet_test,
     }
 
     try:

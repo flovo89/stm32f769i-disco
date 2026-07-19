@@ -26,10 +26,10 @@ Phase C current is reconstructed as `ic = -(ia + ib)`.
 Edit `src/motor/motor.h` to match your shield:
 
 ```c
-#define MOTOR_SHUNT_OHM   0.01f   /* shunt resistor [Ω]  */
-#define MOTOR_AMP_GAIN    20.0f   /* sense amplifier gain */
+#define MOTOR_SHUNT_OHM   0.002f   /* shunt resistor [Ω]  */
+#define MOTOR_AMP_GAIN    50.0f   /* sense amplifier gain */
 #define MOTOR_ENCODER_CPR 1024    /* encoder lines/rev    */
-#define MOTOR_VBUS_V      18.0f   /* DC bus voltage [V]   */
+#define MOTOR_VBUS_V      24.0f   /* DC bus voltage [V]   */
 ```
 
 ---

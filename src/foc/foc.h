@@ -38,6 +38,7 @@ typedef enum {
 	FOC_STATE_IDLE,
 	FOC_STATE_ALIGNING,
 	FOC_STATE_RUNNING,
+	FOC_STATE_FORCED,   /* hold da/db/dc fixed — used by diagnostics */
 	FOC_STATE_ERROR,
 } foc_state_t;
 
@@ -81,6 +82,12 @@ typedef struct {
 	/* Alignment */
 	int   align_ticks_left;
 
+	/* Output voltage clamp — limits max phase voltage and hence peak current.
+	 * Applied to both PI output and post-feedforward combined voltage.
+	 * Default: Vbus/√3 (full linear modulation range).
+	 * Reduce to limit peak current when current sensing range is small. */
+	float vlim;
+
 	/* Statistics */
 	uint32_t overcurrent_count;
 	uint32_t loop_count;
@@ -104,6 +111,8 @@ void foc_set_speed_ref(foc_ctx_t *foc, float rpm);
 void foc_set_torque_ref(foc_ctx_t *foc, float iq_amps);
 void foc_tune_current_pid(foc_ctx_t *foc, float kp, float ki);
 void foc_tune_speed_pid(foc_ctx_t *foc, float kp, float ki);
+void foc_set_vlim(foc_ctx_t *foc, float vlim_v);
+void foc_set_forced_duty(foc_ctx_t *foc, float da, float db, float dc);
 
 /* Math helpers (exposed for testing) */
 void foc_clarke(float ia, float ib, float *alpha, float *beta);

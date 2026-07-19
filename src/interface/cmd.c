@@ -21,12 +21,14 @@
 
 #include "cmd.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/shell/shell.h>
 
@@ -38,6 +40,113 @@ foc_ctx_t g_foc;  /* definition — declared extern in cmd.h */
 
 #define UDP_PORT 5000
 #define BUF_LEN  256
+
+/* ─── MOSFET test helper ─────────────────────────────────────────────────── */
+
+/*
+ * Applies 6 duty-cycle vectors that exercise each high-side and low-side
+ * MOSFET in turn.  If sh != NULL, prints per-vector results to the shell.
+ * Always writes a summary line to *summary / slen.
+ *
+ * Requires: motor not in RUNNING/ALIGNING state.
+ * Leaves:   motor disabled, FOC in IDLE.
+ */
+static void run_mosfet_test(const struct shell *sh, char *summary, size_t slen)
+{
+	if (g_foc.state == FOC_STATE_RUNNING ||
+	    g_foc.state == FOC_STATE_ALIGNING) {
+		snprintf(summary, slen, "ERR disable motor before mosfet_test");
+		return;
+	}
+
+	/* delta: duty offset that produces vlim across one phase pair */
+	float delta = g_foc.vlim / (2.0f * g_foc.vbus);
+
+	typedef struct {
+		const char *name;
+		float da, db, dc;
+		int sa, sb, sc;   /* expected sign: +1 positive, -1 negative, 0 near-zero */
+	} vec_t;
+
+	/* HS = high-side on, LS = low-side on.
+	 * ia,ib from ADC; ic = -(ia+ib). */
+	vec_t vecs[6] = {
+		{"AH-BL", 0.5f+delta, 0.5f-delta, 0.5f,       +1, -1,  0},
+		{"AH-CL", 0.5f+delta, 0.5f,       0.5f-delta,  +1,  0, -1},
+		{"BH-AL", 0.5f-delta, 0.5f+delta, 0.5f,        -1, +1,  0},
+		{"BH-CL", 0.5f,       0.5f+delta, 0.5f-delta,   0, +1, -1},
+		{"CH-AL", 0.5f-delta, 0.5f,       0.5f+delta,  -1,  0, +1},
+		{"CH-BL", 0.5f,       0.5f-delta, 0.5f+delta,   0, -1, +1},
+	};
+
+	motor_enable(true);
+
+	if (sh) {
+		shell_print(sh, "MOSFET test  delta=%.3f  vlim=%.2f V",
+		            (double)delta, (double)g_foc.vlim);
+		shell_print(sh, "Vec  Phases    ia      ib      ic      Result");
+		shell_print(sh, "---  -------  ------  ------  ------  ------");
+	}
+
+	int pass = 0, fail = 0;
+
+	for (int i = 0; i < 6; i++) {
+		vec_t *v = &vecs[i];
+
+		foc_set_forced_duty(&g_foc, v->da, v->db, v->dc);
+		k_sleep(K_MSEC(40));   /* let current settle */
+
+		float sum_a = 0.0f, sum_b = 0.0f;
+		bool  oc    = false;
+
+		for (int s = 0; s < 5; s++) {
+			if (g_foc.state == FOC_STATE_ERROR) { oc = true; break; }
+			sum_a += g_foc.ia;
+			sum_b += g_foc.ib;
+			k_sleep(K_MSEC(5));
+		}
+
+		/* return to neutral before evaluating */
+		foc_set_forced_duty(&g_foc, 0.5f, 0.5f, 0.5f);
+		k_sleep(K_MSEC(10));
+
+		if (oc) {
+			if (sh) {
+				shell_print(sh, "%d    %-7s  OC (overcurrent tripped)",
+				            i + 1, v->name);
+			}
+			fail++;
+			foc_reset(&g_foc);
+			motor_enable(true);
+			continue;
+		}
+
+		float ia = sum_a / 5.0f;
+		float ib = sum_b / 5.0f;
+		float ic = -(ia + ib);
+
+#define CHKSIGN(val, sign) \
+	((sign) > 0 ? (val) > 0.05f : (sign) < 0 ? (val) < -0.05f : fabsf(val) < 0.15f)
+
+		bool ok = CHKSIGN(ia, v->sa) && CHKSIGN(ib, v->sb) && CHKSIGN(ic, v->sc);
+
+#undef CHKSIGN
+
+		if (ok) { pass++; } else { fail++; }
+
+		if (sh) {
+			shell_print(sh, "%d    %-7s  %+.3f  %+.3f  %+.3f  %s",
+			            i + 1, v->name,
+			            (double)ia, (double)ib, (double)ic,
+			            ok ? "PASS" : "FAIL");
+		}
+	}
+
+	foc_reset(&g_foc);
+	motor_enable(false);
+
+	snprintf(summary, slen, "MOSFET test done: %d/6 PASS  %d/6 FAIL", pass, fail);
+}
 
 /* ─── Shared command dispatcher ─────────────────────────────────────────── */
 
@@ -78,6 +187,43 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 		if (n < 3) { snprintf(resp, resp_len, "ERR usage: set_pid_current <kp> <ki>"); return; }
 		foc_tune_current_pid(&g_foc, f1, f2);
 		snprintf(resp, resp_len, "OK kp=%.4f ki=%.4f", (double)f1, (double)f2);
+
+	} else if (strcmp(cmd, "reboot") == 0) {
+		snprintf(resp, resp_len, "OK rebooting...");
+		/* Give the response time to be sent before resetting */
+		k_sleep(K_MSEC(50));
+		sys_reboot(SYS_REBOOT_COLD);
+
+	} else if (strcmp(cmd, "force_duty") == 0) {
+		/* force_duty <da> <db> <dc>  — bypass FOC, hold fixed duty cycles.
+		 * Motor driver must be enabled first (enable command).
+		 * Use disable to exit. Values in [0.0, 1.0], 0.5 = zero voltage. */
+		if (n < 4) {
+			snprintf(resp, resp_len,
+			         "ERR usage: force_duty <da> <db> <dc>  (0.0-1.0, 0.5=zero)");
+			return;
+		}
+		float da = f1 < 0.0f ? 0.0f : (f1 > 1.0f ? 1.0f : f1);
+		float db = f2 < 0.0f ? 0.0f : (f2 > 1.0f ? 1.0f : f2);
+		float dc = f3 < 0.0f ? 0.0f : (f3 > 1.0f ? 1.0f : f3);
+
+		foc_reset(&g_foc);           /* puts FOC in IDLE — stops control loop output */
+		motor_enable(true);          /* ensure driver is on */
+		motor_set_pwm(da, db, dc);   /* apply directly */
+		snprintf(resp, resp_len, "OK da=%.3f db=%.3f dc=%.3f  (disable to exit)",
+		         (double)da, (double)db, (double)dc);
+
+	} else if (strcmp(cmd, "set_vmax") == 0) {
+		if (n < 2) {
+			snprintf(resp, resp_len, "ERR usage: set_vmax <V>  (0 = full range)");
+			return;
+		}
+		foc_set_vlim(&g_foc, f1);
+		snprintf(resp, resp_len, "OK vlim=%.2fV (full=%.2fV)",
+		         (double)g_foc.vlim, (double)(g_foc.vbus / 1.73205f));
+
+	} else if (strcmp(cmd, "mosfet_test") == 0) {
+		run_mosfet_test(NULL, resp, resp_len);
 
 	} else if (strcmp(cmd, "set_motor_params") == 0) {
 		/* set_motor_params <L_mH> <psi_Wb> — update feedforward model */
@@ -172,7 +318,8 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 		snprintf(resp, resp_len,
 		         "ERR unknown command '%s'  "
 		         "[enable|disable|set_speed|set_torque|"
-		         "set_pid_current|set_pid_speed|set_motor_params|calibrate|status"
+		         "set_pid_current|set_pid_speed|set_motor_params|set_vmax|"
+		         "calibrate|status|mosfet_test|force_duty|reboot"
 #ifdef CONFIG_MOTOR_SIM
 		         "|sim_load|sim_info|sim_params"
 #endif
@@ -293,6 +440,53 @@ static int sh_set_motor_params(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int sh_reboot(const struct shell *sh, size_t argc, char **argv)
+{
+	shell_print(sh, "Rebooting...");
+	k_sleep(K_MSEC(50));
+	sys_reboot(SYS_REBOOT_COLD);
+	return 0;
+}
+
+static int sh_force_duty(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc < 4) {
+		shell_error(sh, "Usage: force_duty <da> <db> <dc>  (0.0-1.0, 0.5=zero voltage)");
+		return -EINVAL;
+	}
+	char line[96];
+	char resp[BUF_LEN];
+
+	snprintf(line, sizeof(line), "force_duty %s %s %s", argv[1], argv[2], argv[3]);
+	dispatch(line, resp, sizeof(resp));
+	shell_print(sh, "%s", resp);
+	return 0;
+}
+
+static int sh_set_vmax(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc < 2) {
+		shell_error(sh, "Usage: set_vmax <V>  (0 = full range = Vbus/sqrt3)");
+		return -EINVAL;
+	}
+	char line[64];
+	char resp[BUF_LEN];
+
+	snprintf(line, sizeof(line), "set_vmax %s", argv[1]);
+	dispatch(line, resp, sizeof(resp));
+	shell_print(sh, "%s", resp);
+	return 0;
+}
+
+static int sh_mosfet_test(const struct shell *sh, size_t argc, char **argv)
+{
+	char summary[128];
+
+	run_mosfet_test(sh, summary, sizeof(summary));
+	shell_print(sh, "%s", summary);
+	return 0;
+}
+
 SHELL_CMD_ARG_REGISTER(enable,          NULL, "Enable motor",                sh_enable,         1, 0);
 SHELL_CMD_ARG_REGISTER(disable,         NULL, "Disable motor",               sh_disable,        1, 0);
 SHELL_CMD_ARG_REGISTER(set_speed,       NULL, "Set speed [RPM]",             sh_set_speed,      2, 0);
@@ -302,6 +496,10 @@ SHELL_CMD_ARG_REGISTER(calibrate,       NULL, "Zero current sensors",        sh_
 SHELL_CMD_ARG_REGISTER(set_pid_current,   NULL, "Tune current PID <kp> <ki>",    sh_set_pid_current,   3, 0);
 SHELL_CMD_ARG_REGISTER(set_pid_speed,     NULL, "Tune speed PID <kp> <ki>",      sh_set_pid_speed,     3, 0);
 SHELL_CMD_ARG_REGISTER(set_motor_params,  NULL, "Set feedforward: <L_mH> <psi>", sh_set_motor_params,  3, 0);
+SHELL_CMD_ARG_REGISTER(set_vmax,          NULL, "Limit output voltage [V] (0=full)", sh_set_vmax,     2, 0);
+SHELL_CMD_ARG_REGISTER(force_duty,        NULL, "Force PWM duty <da> <db> <dc>",     sh_force_duty,   4, 0);
+SHELL_CMD_ARG_REGISTER(reboot,            NULL, "Reboot the board",                  sh_reboot,       1, 0);
+SHELL_CMD_ARG_REGISTER(mosfet_test,       NULL, "Test all 6 MOSFETs",                sh_mosfet_test,  1, 0);
 
 #ifdef CONFIG_MOTOR_SIM
 static int sh_sim_load(const struct shell *sh, size_t argc, char **argv)
