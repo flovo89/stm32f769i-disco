@@ -10,8 +10,8 @@
 #define FOC_PWM_HZ           20000      /* PWM switching frequency */
 
 #define FOC_POLE_PAIRS       7          /* Motor pole pair count */
-#define FOC_MAX_CURRENT_A    10.0f      /* Overcurrent trip threshold [A] */
-#define FOC_MAX_TORQUE_A     8.0f       /* Speed PI output clamp [A] — must be
+#define FOC_MAX_CURRENT_A    8.0f      /* Overcurrent trip threshold [A] */
+#define FOC_MAX_TORQUE_A     6.0f       /* Speed PI output clamp [A] — must be
                                          * < FOC_MAX_CURRENT_A so phase current
                                          * transients don't trip overcurrent     */
 #define FOC_MAX_SPEED_RPM    3000.0f

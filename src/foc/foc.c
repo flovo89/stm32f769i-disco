@@ -112,6 +112,26 @@ void foc_init(foc_ctx_t *foc, float vbus_v)
 	         -FOC_MAX_TORQUE_A, FOC_MAX_TORQUE_A);
 }
 
+/*
+ * Trips to ERROR and zeroes PWM if any phase current exceeds the limit.
+ * Checks ia/ib/ic — ia and ib alone can both stay under the limit while
+ * ic = -(ia+ib) exceeds it (e.g. ia=ib=5A -> ic=-10A).
+ */
+static bool foc_check_overcurrent(foc_ctx_t *foc, const char *context)
+{
+	if (fabsf(foc->ia) > FOC_MAX_CURRENT_A ||
+	    fabsf(foc->ib) > FOC_MAX_CURRENT_A ||
+	    fabsf(foc->ic) > FOC_MAX_CURRENT_A) {
+		foc->overcurrent_count++;
+		foc->state = FOC_STATE_ERROR;
+		foc->da = foc->db = foc->dc = 0.5f;
+		LOG_ERR("Overcurrent%s: ia=%.2f ib=%.2f ic=%.2f",
+		        context, (double)foc->ia, (double)foc->ib, (double)foc->ic);
+		return true;
+	}
+	return false;
+}
+
 void foc_reset(foc_ctx_t *foc)
 {
 	foc->state = FOC_STATE_IDLE;
@@ -147,15 +167,23 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 		foc->da = foc->db = foc->dc = 0.5f;
 		return;
 
-	/* ── ALIGNING: open-loop current injection to seat rotor at θ=0 ── */
+	/* ── ALIGNING: closed-loop Id injection to seat rotor at θ=0 ── */
 	case FOC_STATE_ALIGNING: {
-		float align_angle = 0.0f;  /* Drive d-axis to 0 rad */
+		if (foc_check_overcurrent(foc, " during alignment")) {
+			return;
+		}
+
+		const float align_angle = 0.0f;  /* Drive d-axis to 0 rad */
 		float valpha, vbeta;
-		float vd_align = FOC_ALIGN_CURRENT_A * foc->pid_id.kp;
 
-		if (vd_align > foc->vlim) { vd_align = foc->vlim; }
+		foc_clarke(ia, ib, &foc->ialpha, &foc->ibeta);
+		foc_park(foc->ialpha, foc->ibeta, align_angle, &foc->id, &foc->iq);
 
-		foc_inv_park(vd_align, 0.0f, align_angle, &valpha, &vbeta);
+		foc->vd = pid_update(&foc->pid_id,
+		                     FOC_ALIGN_CURRENT_A - foc->id, FOC_CONTROL_DT);
+		foc->vq = pid_update(&foc->pid_iq, 0.0f - foc->iq, FOC_CONTROL_DT);
+
+		foc_inv_park(foc->vd, foc->vq, align_angle, &valpha, &vbeta);
 		foc_svpwm(valpha, vbeta, foc->vbus,
 		          &foc->da, &foc->db, &foc->dc);
 
@@ -171,13 +199,7 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 
 	/* ── FORCED: hold da/db/dc as set externally — diagnostics only ── */
 	case FOC_STATE_FORCED:
-		if (fabsf(ia) > FOC_MAX_CURRENT_A || fabsf(ib) > FOC_MAX_CURRENT_A) {
-			foc->overcurrent_count++;
-			foc->state = FOC_STATE_ERROR;
-			foc->da = foc->db = foc->dc = 0.5f;
-			LOG_ERR("Overcurrent in forced mode: ia=%.2f ib=%.2f",
-			        (double)ia, (double)ib);
-		}
+		foc_check_overcurrent(foc, " in forced mode");
 		return;
 
 	/* ── ERROR: output zero voltage ── */
@@ -190,11 +212,7 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 	}
 
 	/* ── Overcurrent protection ── */
-	if (fabsf(ia) > FOC_MAX_CURRENT_A || fabsf(ib) > FOC_MAX_CURRENT_A) {
-		foc->overcurrent_count++;
-		foc->state = FOC_STATE_ERROR;
-		foc->da = foc->db = foc->dc = 0.5f;
-		LOG_ERR("Overcurrent: ia=%.2f ib=%.2f", (double)ia, (double)ib);
+	if (foc_check_overcurrent(foc, "")) {
 		return;
 	}
 
@@ -293,7 +311,7 @@ void foc_tune_current_pid(foc_ctx_t *foc, float kp, float ki)
 void foc_tune_speed_pid(foc_ctx_t *foc, float kp, float ki)
 {
 	pid_init(&foc->pid_speed, kp, ki,
-	         -FOC_MAX_CURRENT_A, FOC_MAX_CURRENT_A);
+	         -FOC_MAX_TORQUE_A, FOC_MAX_TORQUE_A);
 }
 
 void foc_set_vlim(foc_ctx_t *foc, float vlim_v)
