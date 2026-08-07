@@ -47,7 +47,7 @@
 /* ─── Phase A PWM — PC8 / TIM3 CH3 ─────────────────────────────────────── */
 &timers3 {
 	status = "okay";
-	st,prescaler = <0>;  /* No prescaler — use full APB1 clock */
+	st,prescaler = <0>;
 
 	pwm_phase_a: pwm {
 		status = "okay";

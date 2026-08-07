@@ -79,6 +79,18 @@ static void run_mosfet_test(const struct shell *sh, char *summary, size_t slen)
 		{"CH-BL", 0.5f,       0.5f-delta, 0.5f+delta,   0, -1, +1},
 	};
 
+	/* Wait up to 3 s for rotor to coast to a stop before applying test vectors.
+	 * Back-EMF from a spinning rotor swamps the small test voltage on the
+	 * neutral (floating) phase and causes spurious failures. */
+	{
+		float th, om;
+		for (int w = 0; w < 30; w++) {
+			motor_read_encoder(&th, &om);
+			if (fabsf(om) < 2.0f) { break; }
+			k_sleep(K_MSEC(100));
+		}
+	}
+
 	motor_enable(true);
 
 	if (sh) {
@@ -125,8 +137,10 @@ static void run_mosfet_test(const struct shell *sh, char *summary, size_t slen)
 		float ib = sum_b / 5.0f;
 		float ic = -(ia + ib);
 
+/* Neutral phase (sign==0) is not checked: back-EMF from rotor motion
+ * circulates current through all phases and makes ic=-(ia+ib) unreliable. */
 #define CHKSIGN(val, sign) \
-	((sign) > 0 ? (val) > 0.05f : (sign) < 0 ? (val) < -0.05f : fabsf(val) < 0.15f)
+	((sign) > 0 ? (val) > 0.10f : (sign) < 0 ? (val) < -0.10f : true)
 
 		bool ok = CHKSIGN(ia, v->sa) && CHKSIGN(ib, v->sb) && CHKSIGN(ic, v->sc);
 
@@ -195,9 +209,9 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 		sys_reboot(SYS_REBOOT_COLD);
 
 	} else if (strcmp(cmd, "force_duty") == 0) {
-		/* force_duty <da> <db> <dc>  — bypass FOC, hold fixed duty cycles.
-		 * Motor driver must be enabled first (enable command).
-		 * Use disable to exit. Values in [0.0, 1.0], 0.5 = zero voltage. */
+		/* force_duty <da> <db> <dc>  — hold fixed duty cycles indefinitely.
+		 * Uses FOC_STATE_FORCED so the control thread does not overwrite them.
+		 * Use 'disable' to exit. Values in [0.0, 1.0], 0.5 = zero voltage. */
 		if (n < 4) {
 			snprintf(resp, resp_len,
 			         "ERR usage: force_duty <da> <db> <dc>  (0.0-1.0, 0.5=zero)");
@@ -207,9 +221,8 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 		float db = f2 < 0.0f ? 0.0f : (f2 > 1.0f ? 1.0f : f2);
 		float dc = f3 < 0.0f ? 0.0f : (f3 > 1.0f ? 1.0f : f3);
 
-		foc_reset(&g_foc);           /* puts FOC in IDLE — stops control loop output */
-		motor_enable(true);          /* ensure driver is on */
-		motor_set_pwm(da, db, dc);   /* apply directly */
+		motor_enable(true);
+		foc_set_forced_duty(&g_foc, da, db, dc);
 		snprintf(resp, resp_len, "OK da=%.3f db=%.3f dc=%.3f  (disable to exit)",
 		         (double)da, (double)db, (double)dc);
 

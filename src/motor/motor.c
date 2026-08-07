@@ -21,8 +21,9 @@ LOG_MODULE_REGISTER(motor, LOG_LEVEL_INF);
 #ifndef CONFIG_MOTOR_SIM
 static const struct device *adc_dev  = DEVICE_DT_GET(DT_NODELABEL(adc1));
 static const struct device *qdec_dev = DEVICE_DT_GET(DT_NODELABEL(qdec0));
-static const struct device *gpiof_dev = DEVICE_DT_GET(DT_NODELABEL(gpiof));
 #endif
+
+static const struct device *gpiof_dev = DEVICE_DT_GET(DT_NODELABEL(gpiof));
 
 static const struct device *pwm_a_dev =
 	DEVICE_DT_GET(DT_NODELABEL(pwm_phase_a));
@@ -141,12 +142,10 @@ int motor_init(void)
 		return -ENODEV;
 	}
 
-	/* Float the former encoder GPIO pins — previously had pull-ups via the
-	 * old gpio-keys overlay node.  Configure as plain inputs (no pull) so
-	 * they sit at high-Z and don't interfere with whatever is wired to them. */
-	gpio_pin_configure(gpiof_dev, 6, GPIO_INPUT);         /* old enc_a PF6/D3 */
-	gpio_pin_configure(motor_en_gpio.port, 1, GPIO_INPUT); /* old enc_b PJ1/D2 */
-	gpio_pin_configure(motor_en_gpio.port, 0, GPIO_INPUT); /* old enc_z PJ0/D4 */
+	/* Float unused former encoder GPIO pins (PF6, PJ1, PJ0). */
+	gpio_pin_configure(gpiof_dev, 6, GPIO_INPUT);          /* old PF6/D3        */
+	gpio_pin_configure(motor_en_gpio.port, 1, GPIO_INPUT); /* old enc_b PJ1/D2  */
+	gpio_pin_configure(motor_en_gpio.port, 0, GPIO_INPUT); /* old enc_z PJ0/D4  */
 #endif /* CONFIG_MOTOR_SIM */
 
 	/* --- PWM (always active — oscilloscope verification in sim mode) --- */
@@ -201,7 +200,7 @@ int motor_read_currents(float *ia, float *ib)
 	if (ret) { LOG_ERR("ADC ch12 read: %d", ret); return ret; }
 
 	*ia = (adc_raw_a - cal_offset_ch6)  * MOTOR_CURRENT_SCALE;
-	*ib = (adc_raw_b - cal_offset_ch12) * MOTOR_CURRENT_SCALE;
+	*ib = -(adc_raw_b - cal_offset_ch12) * MOTOR_CURRENT_SCALE;
 
 	return 0;
 #endif
