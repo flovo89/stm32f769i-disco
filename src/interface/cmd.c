@@ -177,6 +177,7 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 
 	if (strcmp(cmd, "enable") == 0) {
 		motor_enable(true);
+		k_sleep(K_MSEC(10)); /* gate driver wake-up before FOC reads currents */
 		foc_enable(&g_foc, true);
 		snprintf(resp, resp_len, "OK");
 
@@ -270,6 +271,7 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 		snprintf(resp, resp_len,
 		         "STATE=%s MODE=%s SPEED=%.1f SPEED_REF=%.1f "
 		         "IA=%.3f IB=%.3f ID=%.3f IQ=%.3f IQ_REF=%.3f "
+		         "VD=%.3f VQ=%.3f "
 		         "TORQUE=%.4f TORQUE_REF=%.4f "
 		         "THETA_E=%.3f VBUS=%.1f OC=%u "
 		         "DA=%.3f DB=%.3f DC=%.3f LOOPS=%u"
@@ -284,6 +286,7 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 		         (double)g_foc.ia, (double)g_foc.ib,
 		         (double)g_foc.id, (double)g_foc.iq,
 		         (double)g_foc.iq_ref,
+		         (double)g_foc.vd, (double)g_foc.vq,
 		         (double)(kt * g_foc.iq),
 		         (double)(kt * g_foc.iq_ref),
 		         (double)g_foc.theta_e,

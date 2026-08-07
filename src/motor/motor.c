@@ -192,15 +192,34 @@ int motor_read_currents(float *ia, float *ib)
 	sim_get_currents(&g_sim, ia, ib);
 	return 0;
 #else
-	int ret = adc_read(adc_dev, &adc_seq_a);
+	/* Two-point oversampling: sample at t=0 and t=25µs (half the 20kHz PWM
+	 * period).  The 10kHz FOC timer is at a 2:1 ratio with the 20kHz PWM, so
+	 * without this the ADC always lands at the same ripple phase and the
+	 * switching ripple aliases to a fixed DC offset in the current reading.
+	 * Averaging two readings half a period apart cancels the alias. */
+	int ret;
+	int16_t raw_a1, raw_b1, raw_a2, raw_b2;
 
+	ret = adc_read(adc_dev, &adc_seq_a);
 	if (ret) { LOG_ERR("ADC ch6 read: %d", ret); return ret; }
+	raw_a1 = adc_raw_a;
 
 	ret = adc_read(adc_dev, &adc_seq_b);
 	if (ret) { LOG_ERR("ADC ch12 read: %d", ret); return ret; }
+	raw_b1 = adc_raw_b;
 
-	*ia = (adc_raw_a - cal_offset_ch6)  * MOTOR_CURRENT_SCALE;
-	*ib = -(adc_raw_b - cal_offset_ch12) * MOTOR_CURRENT_SCALE;
+	k_busy_wait(25); /* half PWM period = 25 µs at 20 kHz */
+
+	ret = adc_read(adc_dev, &adc_seq_a);
+	if (ret) { LOG_ERR("ADC ch6 read2: %d", ret); return ret; }
+	raw_a2 = adc_raw_a;
+
+	ret = adc_read(adc_dev, &adc_seq_b);
+	if (ret) { LOG_ERR("ADC ch12 read2: %d", ret); return ret; }
+	raw_b2 = adc_raw_b;
+
+	*ia =  ((int32_t)(raw_a1 + raw_a2) / 2 - cal_offset_ch6)  * MOTOR_CURRENT_SCALE;
+	*ib = -((int32_t)(raw_b1 + raw_b2) / 2 - cal_offset_ch12) * MOTOR_CURRENT_SCALE;
 
 	return 0;
 #endif
@@ -271,11 +290,15 @@ float motor_read_encoder(float *theta_rad, float *omega_rad_s)
 	int64_t now_us = k_uptime_get() * 1000LL;
 
 	/* Position: signed movement from enc_offset, corrected for the 61440-period
-	 * QDEC counter rollover, then wrapped into [0, CPR4). */
+	 * QDEC counter rollover, then wrapped into [0, CPR4).
+	 * MOTOR_ENCODER_POLARITY (-1) reverses direction when the encoder counts
+	 * backward relative to the motor's positive-torque rotation direction. */
 	int32_t pos_delta = raw - enc_offset;
 
 	if (pos_delta >  (int32_t)(QDEC_PERIOD / 2)) { pos_delta -= QDEC_PERIOD; }
 	if (pos_delta < -(int32_t)(QDEC_PERIOD / 2)) { pos_delta += QDEC_PERIOD; }
+
+	pos_delta *= MOTOR_ENCODER_POLARITY;
 
 	int32_t pos = ((pos_delta % CPR4) + CPR4) % CPR4;
 
@@ -289,6 +312,8 @@ float motor_read_encoder(float *theta_rad, float *omega_rad_s)
 
 		if (delta >  (int32_t)(QDEC_PERIOD / 2)) { delta -= QDEC_PERIOD; }
 		if (delta < -(int32_t)(QDEC_PERIOD / 2)) { delta += QDEC_PERIOD; }
+
+		delta *= MOTOR_ENCODER_POLARITY;
 
 		int64_t dt_us = now_us - omega_time_base;
 

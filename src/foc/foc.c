@@ -1,4 +1,5 @@
 #include "foc.h"
+#include "../motor/motor.h"
 
 #include <math.h>
 #include <string.h>
@@ -119,9 +120,10 @@ void foc_init(foc_ctx_t *foc, float vbus_v)
  */
 static bool foc_check_overcurrent(foc_ctx_t *foc, const char *context)
 {
+	/* Only check measured phases — ic = -(ia+ib) is computed and can exceed
+	 * the ADC range when both channels saturate, causing spurious trips. */
 	if (fabsf(foc->ia) > FOC_MAX_CURRENT_A ||
-	    fabsf(foc->ib) > FOC_MAX_CURRENT_A ||
-	    fabsf(foc->ic) > FOC_MAX_CURRENT_A) {
+	    fabsf(foc->ib) > FOC_MAX_CURRENT_A) {
 		foc->overcurrent_count++;
 		foc->state = FOC_STATE_ERROR;
 		foc->da = foc->db = foc->dc = 0.5f;
@@ -167,13 +169,19 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 		foc->da = foc->db = foc->dc = 0.5f;
 		return;
 
-	/* ── ALIGNING: closed-loop Id injection to seat rotor at θ=0 ── */
+	/* ── ALIGNING: two-step to resolve the θ=0 / θ=π ambiguity ──
+	 * Phase 1 (first half): park at π/2  — rotor moves unambiguously to ~π/2
+	 * Phase 2 (second half): park at 0   — rotor approaches 0 from π/2, never
+	 *                                       from the opposite side (π)          */
 	case FOC_STATE_ALIGNING: {
 		if (foc_check_overcurrent(foc, " during alignment")) {
 			return;
 		}
 
-		const float align_angle = 0.0f;  /* Drive d-axis to 0 rad */
+		const int   total_ticks = (FOC_ALIGN_MS * FOC_CONTROL_HZ) / 1000;
+		const float align_angle = (foc->align_ticks_left > total_ticks / 2)
+		                          ? 1.5707963f   /* π/2 */
+		                          : 0.0f;
 		float valpha, vbeta;
 
 		foc_clarke(ia, ib, &foc->ialpha, &foc->ibeta);
@@ -189,6 +197,7 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 
 		if (--foc->align_ticks_left <= 0) {
 			LOG_INF("Alignment done");
+			motor_reset_encoder();   /* zero encoder at the aligned rotor position */
 			foc->state = FOC_STATE_RUNNING;
 			pid_reset(&foc->pid_id);
 			pid_reset(&foc->pid_iq);
