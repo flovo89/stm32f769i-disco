@@ -14,20 +14,21 @@
 #define FOC_MAX_TORQUE_A     6.0f       /* Speed PI output clamp [A] — must be
                                          * < FOC_MAX_CURRENT_A so phase current
                                          * transients don't trip overcurrent     */
-#define FOC_MAX_SPEED_RPM    3000.0f
+#define FOC_MAX_SPEED_RPM    5000.0f
 
 /* Motor electrical parameters for decoupling feedforward.
- * Set to sim defaults; override via set_motor_params for real hardware. */
-#define FOC_MOTOR_L_H        1e-3f     /* Stator inductance [H] */
-#define FOC_MOTOR_PSI_WB     0.02f     /* PM flux linkage [Wb]  */
+ * Override via set_motor_params at runtime if needed. */
+#define FOC_MOTOR_L_H        1.6e-5f   /* Stator inductance [H]  — measured ~16 µH */
+#define FOC_MOTOR_PSI_WB     7.2e-4f /* PM flux linkage [Wb]   — measured: 0.00072 Wb */
 
 /* Alignment: apply Id_align at theta=0 for align_ms */
 #define FOC_ALIGN_CURRENT_A  1.0f
 #define FOC_ALIGN_MS         500
 
-/* Default current PI gains (tune per motor) */
-#define FOC_KP_CURRENT       0.5f
-#define FOC_KI_CURRENT       50.0f
+/* Default current PI gains — tuned for L=16µH, R=0.182Ω, ω_bw=500 rad/s
+ * Kp = ω_bw × L = 0.008,  Ki = ω_bw × R = 91 */
+#define FOC_KP_CURRENT       0.008f
+#define FOC_KI_CURRENT       91.0f
 
 /* Default speed PI gains */
 #define FOC_KP_SPEED         0.05f

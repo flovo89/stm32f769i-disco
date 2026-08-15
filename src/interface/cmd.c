@@ -503,6 +503,15 @@ static int sh_mosfet_test(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int sh_adc_raw(const struct shell *sh, size_t argc, char **argv)
+{
+	char buf[256];
+
+	motor_adc_dump(buf, sizeof(buf));
+	shell_print(sh, "%s", buf);
+	return 0;
+}
+
 SHELL_CMD_ARG_REGISTER(enable,          NULL, "Enable motor",                sh_enable,         1, 0);
 SHELL_CMD_ARG_REGISTER(disable,         NULL, "Disable motor",               sh_disable,        1, 0);
 SHELL_CMD_ARG_REGISTER(set_speed,       NULL, "Set speed [RPM]",             sh_set_speed,      2, 0);
@@ -516,6 +525,7 @@ SHELL_CMD_ARG_REGISTER(set_vmax,          NULL, "Limit output voltage [V] (0=ful
 SHELL_CMD_ARG_REGISTER(force_duty,        NULL, "Force PWM duty <da> <db> <dc>",     sh_force_duty,   4, 0);
 SHELL_CMD_ARG_REGISTER(reboot,            NULL, "Reboot the board",                  sh_reboot,       1, 0);
 SHELL_CMD_ARG_REGISTER(mosfet_test,       NULL, "Test all 6 MOSFETs",                sh_mosfet_test,  1, 0);
+SHELL_CMD_ARG_REGISTER(adc_raw,           NULL, "Dump raw ADC/DMA diagnostic",        sh_adc_raw,      1, 0);
 
 #ifdef CONFIG_MOTOR_SIM
 static int sh_sim_load(const struct shell *sh, size_t argc, char **argv)

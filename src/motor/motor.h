@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /*
@@ -27,7 +28,7 @@
 #define MOTOR_ENCODER_POLARITY (-1)
 
 /* DC bus voltage (no bus-voltage sense pin in this hardware setup) */
-#define MOTOR_VBUS_V       18.0f
+#define MOTOR_VBUS_V       10.0f
 
 int  motor_init(void);
 
@@ -54,6 +55,9 @@ void motor_set_pwm(float da, float db, float dc);
 
 /* Zero the current sensor offsets at standstill (motor must be disabled). */
 int motor_calibrate_currents(void);
+
+/* Dump raw ADC/DMA diagnostic info into buf (null-terminated). */
+void motor_adc_dump(char *buf, size_t len);
 
 /* Encoder count — exposed so alignment can reset it. */
 void motor_reset_encoder(void);
