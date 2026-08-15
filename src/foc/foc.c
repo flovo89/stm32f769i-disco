@@ -169,39 +169,52 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 		foc->da = foc->db = foc->dc = 0.5f;
 		return;
 
-	/* ── ALIGNING: two-step to resolve the θ=0 / θ=π ambiguity ──
-	 * Phase 1 (first half): park at π/2  — rotor moves unambiguously to ~π/2
-	 * Phase 2 (second half): park at 0   — rotor approaches 0 from π/2, never
-	 *                                       from the opposite side (π)          */
+	/* ── ALIGNING: open-loop field ramp to resolve the θ=0 / θ=π ambiguity ──
+	 * Phase 1 (first 25%): hold field at π/2 — rotor settles at ~π/2.
+	 * Phase 2 (last  75%): linearly ramp field from π/2 → 0° — rotor is
+	 * dragged from its π/2 equilibrium to the 0° equilibrium unambiguously.
+	 * Direct voltage (FOC_ALIGN_VOLTAGE_V) bypasses the current PI: the actual
+	 * alignment current saturates the ADC, so PI control is unreliable here.
+	 * OC check is skipped during alignment for the same reason; it resumes on
+	 * entry to RUNNING.                                                         */
 	case FOC_STATE_ALIGNING: {
-		if (foc_check_overcurrent(foc, " during alignment")) {
-			return;
+		const int total_ticks  = (FOC_ALIGN_MS * FOC_CONTROL_HZ) / 1000;
+		const int phase2_ticks = total_ticks * 3 / 4;  /* 75% for the ramp */
+		float align_angle;
+
+		if (foc->align_ticks_left > phase2_ticks) {
+			align_angle = 1.5707963f;                           /* phase 1: π/2 */
+		} else {
+			float progress = 1.0f - (float)foc->align_ticks_left
+			                        / (float)phase2_ticks;
+			align_angle = 1.5707963f * (1.0f - progress);      /* phase 2: π/2→0 */
 		}
 
-		const int   total_ticks = (FOC_ALIGN_MS * FOC_CONTROL_HZ) / 1000;
-		const float align_angle = (foc->align_ticks_left > total_ticks / 2)
-		                          ? 1.5707963f   /* π/2 */
-		                          : 0.0f;
-		float valpha, vbeta;
-
+		/* Record diagnostic fields (currents in field frame) */
 		foc_clarke(ia, ib, &foc->ialpha, &foc->ibeta);
 		foc_park(foc->ialpha, foc->ibeta, align_angle, &foc->id, &foc->iq);
+		foc->vd = FOC_ALIGN_VOLTAGE_V;
+		foc->vq = 0.0f;
 
-		foc->vd = pid_update(&foc->pid_id,
-		                     FOC_ALIGN_CURRENT_A - foc->id, FOC_CONTROL_DT);
-		foc->vq = pid_update(&foc->pid_iq, 0.0f - foc->iq, FOC_CONTROL_DT);
+		/* Apply open-loop voltage — identical to the Python set_angle() helper */
+		float valpha, vbeta;
 
-		foc_inv_park(foc->vd, foc->vq, align_angle, &valpha, &vbeta);
-		foc_svpwm(valpha, vbeta, foc->vbus,
-		          &foc->da, &foc->db, &foc->dc);
+		foc_inv_park(FOC_ALIGN_VOLTAGE_V, 0.0f, align_angle, &valpha, &vbeta);
+		foc_svpwm(valpha, vbeta, foc->vbus, &foc->da, &foc->db, &foc->dc);
 
 		if (--foc->align_ticks_left <= 0) {
 			LOG_INF("Alignment done");
-			motor_reset_encoder();   /* zero encoder at the aligned rotor position */
+			motor_reset_encoder();
 			foc->state = FOC_STATE_RUNNING;
 			pid_reset(&foc->pid_id);
 			pid_reset(&foc->pid_iq);
 			pid_reset(&foc->pid_speed);
+			/* Pre-charge the d-axis integrator to maintain the alignment
+			 * voltage at the transition boundary.  Without this the PWM
+			 * drops to near-zero for several ms while the PI winds up,
+			 * and cogging snaps the rotor to the next stable tooth before
+			 * the current loop can react.                                 */
+			foc->pid_id.integrator = FOC_ALIGN_VOLTAGE_V;
 		}
 		return;
 	}
@@ -244,9 +257,20 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 
 	/* ── Feed-forward decoupling (cross-coupling + back-EMF) ──
 	 *   vd_ff = -ω_e · L · iq
-	 *   vq_ff = +ω_e · (L · id + ψ_m)                          */
-	foc->vd -= foc->omega_e * foc->L_motor * foc->iq;
-	foc->vq += foc->omega_e * (foc->L_motor * foc->id + foc->psi_motor);
+	 *   vq_ff = +ω_e · (L · id + ψ_m)
+	 * Dead zone ±50 rad/s (≈ ±68 RPM): stall-twitches cause the velocity
+	 * estimator to register spurious high omega, injecting a large erroneous
+	 * VD that destabilises the current loop.  Below this speed the PI alone
+	 * handles cross-coupling; above it the feedforward is engaged.
+	 * Hard clamp at ±4000 rad/s prevents corruption from wider velocity
+	 * noise bursts.                                                        */
+	float omega_ff = foc->omega_e;
+
+	if (omega_ff >  -50.0f && omega_ff <  50.0f) { omega_ff =  0.0f; }
+	if (omega_ff >  4000.0f) { omega_ff =  4000.0f; }
+	if (omega_ff < -4000.0f) { omega_ff = -4000.0f; }
+	foc->vd -= omega_ff * foc->L_motor * foc->iq;
+	foc->vq += omega_ff * (foc->L_motor * foc->id + foc->psi_motor);
 
 	/* ── Hard voltage clamp (PI + feedforward combined) ──
 	 * Limits peak phase current regardless of feedforward accuracy.

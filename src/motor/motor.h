@@ -22,9 +22,10 @@
 	(MOTOR_ADC_VREF_V / (MOTOR_ADC_COUNTS * MOTOR_SHUNT_OHM * MOTOR_AMP_GAIN))
 
 /* Encoder */
-#define MOTOR_ENCODER_CPR      1024  /* Lines per revolution (×4 for quadrature) */
-/* Set to -1 if IQ reads negative under positive IQ_REF in closed-loop.
- * Symptom: motor stalls when encoder is mounted; follows when driven externally. */
+#define MOTOR_ENCODER_CPR      1024   /* Lines per revolution (×4 for quadrature) */
+/* +1 = encoder counts forward when motor rotates in positive-torque direction.
+ * -1 = flip if IQ reads negative under positive IQ_REF in closed-loop, or if
+ *      the motor stalls despite IQ ≈ IQ_REF (wrong theta_e tracking direction). */
 #define MOTOR_ENCODER_POLARITY (-1)
 
 /* DC bus voltage (no bus-voltage sense pin in this hardware setup) */

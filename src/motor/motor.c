@@ -97,6 +97,22 @@ static float    omega_hold;
 static int16_t cal_offset_ch6  = 2048;
 static int16_t cal_offset_ch12 = 2048;
 
+/* TIM12 and TIM11 counter values captured at the ADC sample moment.
+ * Used by motor_adc_dump() to verify timer phase alignment. */
+static uint32_t last_tim12_cnt;
+static uint32_t last_tim11_cnt;
+
+/* Phase offset of TIM12 relative to TIM3, measured at motor_init() time.
+ * TIM12 leads TIM3 by this many counts because TIM12 has no ITR path from TIM3
+ * (STM32F769 RM0410 Table 127: TIM12 ITR2 = TIM13_TRGO, not TIM3_TRGO). */
+static uint32_t tim12_phase_lead;
+
+/* Full-scale timer counts for each phase — (ARR + 1) read from registers after
+ * init so motor_set_pwm() can compute CCR without going through pwm_set(). */
+static uint32_t pwm_counts_a;
+static uint32_t pwm_counts_b;
+static uint32_t pwm_counts_c;
+
 #endif /* CONFIG_MOTOR_SIM */
 
 /* ─── PWM period (ns) ────────────────────────────────────────────────────── */
@@ -108,33 +124,66 @@ static int16_t cal_offset_ch12 = 2048;
 #ifndef CONFIG_MOTOR_SIM
 
 /*
- * Configure TIM3 CH4 to generate OC4REF at 75% of the PWM period, then route
- * that signal to TIM3_TRGO so it can trigger ADC conversions.
+ * Set TIM3 CCR4 to an initial value that places the ADC sample inside Phase A's
+ * low-side-ON window.  motor_set_pwm() updates CCR4 dynamically every FOC cycle
+ * to track Phase A's zero-ripple midpoint: CCR4 = (CCR3_A + ARR) / 2.
+ * The init value here is overwritten on the first motor_set_pwm() call.
  *
- * TIM3 is already running (started by Zephyr's PWM driver).  CH4 is unused
- * for PWM output — we use it only as an internal compare event.
- *
- * With OC4M = PWM mode 2 and CCR4 = 75% × ARR:
- *   OC4REF = 0 while CNT < CCR4  (first 75% of the period)
- *   OC4REF = 1 while CNT ≥ CCR4  (rising edge at the match → TRGO fires)
- *
- * At 20kHz the trigger fires at t = 37.5 µs after the period start, which
- * is in the centre of the A-low-ON and B-low-ON windows for duty cycles ≤ 0.75.
+ * TIM12 has no ITR path from TIM3 on STM32F769 (RM0410 Table 127), so its phase
+ * offset relative to TIM3 is measured once and stored as tim12_phase_lead.
  */
 static void motor_setup_tim3_trgo(void)
 {
-	uint32_t arr = TIM3->ARR;  /* read ARR set by the Zephyr PWM driver */
-
-	TIM3->CCR4 = (arr * 3U) / 4U;
-
 	/* CCMR2: OC4M = PWM mode 2 (OC4M[2:0] = 0b111), preload enable */
 	TIM3->CCMR2 = (TIM3->CCMR2 & ~TIM_CCMR2_OC4M)
 	            | TIM_CCMR2_OC4M_0 | TIM_CCMR2_OC4M_1 | TIM_CCMR2_OC4M_2
 	            | TIM_CCMR2_OC4PE;
 
-	/* Force an update event to load CCR4 from its preload register immediately.
-	 * Motor is not yet enabled so this counter reset is harmless. */
-	TIM3->EGR = TIM_EGR_UG;
+	/* TIM12 has no hardware ITR path from TIM3 on STM32F769 (RM0410 Table 127:
+	 * TIM12 ITR0=TIM4, ITR1=TIM5, ITR2=TIM13, ITR3=TIM14 — TIM3 is absent).
+	 * Hardware master-slave sync is therefore impossible between TIM3 and TIM12.
+	 *
+	 * Instead: reset TIM3 via EGR=UG, immediately read TIM12->CNT to measure
+	 * the fixed phase offset, then set CCR4 so the ADC fires when TIM12 is at
+	 * its zero-ripple point (midpoint of the low-side-ON window at d=0.5). */
+	TIM3->EGR = TIM_EGR_UG;         /* resets TIM3->CNT to 0, leaves TIM12 alone */
+	__DSB();
+	tim12_phase_lead = TIM12->CNT;  /* TIM12 not reset → captures its phase lead */
+
+	/* Configure TIM3 as PWM master: TRGO = Update event (MMS[2:0] = 010).
+	 * Every TIM3 counter overflow generates a trigger output to slave timers. */
+	TIM3->CR2 = (TIM3->CR2 & ~TIM_CR2_MMS) | (2U << TIM_CR2_MMS_Pos);
+
+	/* Slave TIM11 (phase C) to TIM3 via ITR2 in Reset mode.
+	 * RM0410 Table 102 confirms TIM11 ITR2 = TIM3_TRGO.
+	 * Reset mode (SMS=100) resets TIM11->CNT to 0 on each TIM3 overflow,
+	 * keeping phase C switching phase-locked to phase A (TIM3).
+	 * This prevents TIM11 from being in its high-side window at the ADC
+	 * sample point, which would otherwise inject phantom currents into the
+	 * IA/IB measurements through the floating neutral point. */
+	TIM11->SMCR = (TIM11->SMCR & ~0x0077U)   /* clear TS[2:0] and SMS[2:0] */
+	            | (2U << TIM_SMCR_TS_Pos)     /* TS=010 → ITR2 = TIM3_TRGO */
+	            | (4U << TIM_SMCR_SMS_Pos);   /* SMS=100 → Reset mode       */
+
+	uint32_t arr         = TIM3->ARR;
+	uint32_t zero_ripple = (arr * 3U) / 4U;        /* 75% = 4049 for ARR=5399 */
+	uint32_t lead        = tim12_phase_lead % (arr + 1U);
+	TIM3->CCR4 = (lead <= zero_ripple) ? (zero_ripple - lead)
+	                                    : (zero_ripple + (arr + 1U) - lead);
+
+	/* Cache (ARR + 1) so motor_set_pwm() can write CCR directly instead of
+	 * calling pwm_set(), which would trigger another EGR=UG reset. */
+	pwm_counts_a = arr  + 1U;
+	pwm_counts_b = TIM12->ARR + 1U;
+	pwm_counts_c = TIM11->ARR + 1U;
+
+	LOG_INF("TIM11→TIM3 slave sync enabled (ITR2 reset mode)");
+	LOG_INF("TIM12 phase lead=%u counts; CCR4=%u (sample at TIM3=%u, TIM12~%u); "
+	        "counts A=%u B=%u C=%u",
+	        tim12_phase_lead,
+	        (unsigned)TIM3->CCR4, (unsigned)TIM3->CCR4,
+	        (unsigned)TIM3->CCR4 + tim12_phase_lead,
+	        pwm_counts_a, pwm_counts_b, pwm_counts_c);
 }
 
 /*
@@ -297,34 +346,52 @@ int motor_read_currents(float *ia, float *ib)
 	sim_get_currents(&g_sim, ia, ib);
 	return 0;
 #else
-	/* Phase-lock the sample to the 75% point of the TIM3 period.
-	 * At CCR4 (= ARR × 3/4 = 4049): all low-side FETs are ON, and the
-	 * current-ripple triangle crosses zero (I_instant = I_average).
-	 * With L=16µH, Vbus=10V, fsw=20kHz the ripple is ~15A peak-to-peak;
-	 * sampling off-phase aliases this ripple directly into the control loop.
-	 * Max busy-wait = one TIM3 period (50 µs) < 100 µs FOC budget. */
+	/* Two-point oversampling: sample at the Phase A zero-ripple point (CCR4),
+	 * then again 25 µs later (half the 20 kHz PWM period).  The two samples
+	 * sit on opposite flanks of the current ripple triangle; their average
+	 * equals the true mean current, cancelling the ripple alias for both
+	 * Phase A and Phase B regardless of their individual sampling fractions.
+	 * Max first busy-wait = one TIM3 period (50 µs). */
 	uint32_t target = TIM3->CCR4;
 
 	if (TIM3->CNT >= target) {
 		while (TIM3->CNT >= target);   /* wait for counter overflow */
 	}
-	while (TIM3->CNT < target);         /* wait until CNT reaches 75% */
+	while (TIM3->CNT < target);         /* wait until CNT reaches CCR4 */
 
+	/* Sample 1 */
+	last_tim12_cnt = TIM12->CNT;
+	last_tim11_cnt = TIM11->CNT;
 	DMA2->LIFCR = DMA_LIFCR_CTCIF0 | DMA_LIFCR_CHTIF0;
 	ADC1->CR2 |= ADC_CR2_SWSTART;
 
-	/* Spin until DMA completes both channels (~1.5 µs at 27 MHz ADC clock). */
 	uint32_t spin = 10000U;
 	while (!(DMA2->LISR & DMA_LISR_TCIF0) && spin) {
 		spin--;
 	}
-
 	sys_cache_data_invd_range((void *)adc_dma_buf, sizeof(adc_dma_buf));
+	int32_t raw_a1 = (int32_t)adc_dma_buf[0];
+	int32_t raw_b1 = (int32_t)adc_dma_buf[1];
 
-	int32_t raw_a = (int32_t)adc_dma_buf[0] - (int32_t)cal_offset_ch6;
-	int32_t raw_b = (int32_t)adc_dma_buf[1] - (int32_t)cal_offset_ch12;
-	*ia =  (float)raw_a * MOTOR_CURRENT_SCALE;
-	*ib = -(float)raw_b * MOTOR_CURRENT_SCALE;
+	/* Wait half a PWM period so sample 2 lands on the opposite ripple flank */
+	k_busy_wait(25);
+
+	/* Sample 2 */
+	DMA2->LIFCR = DMA_LIFCR_CTCIF0 | DMA_LIFCR_CHTIF0;
+	ADC1->CR2 |= ADC_CR2_SWSTART;
+	spin = 10000U;
+	while (!(DMA2->LISR & DMA_LISR_TCIF0) && spin) {
+		spin--;
+	}
+	sys_cache_data_invd_range((void *)adc_dma_buf, sizeof(adc_dma_buf));
+	int32_t raw_a2 = (int32_t)adc_dma_buf[0];
+	int32_t raw_b2 = (int32_t)adc_dma_buf[1];
+
+	/* Average the two samples and subtract zero-current offsets */
+	int32_t avg_a = (raw_a1 + raw_a2) / 2 - (int32_t)cal_offset_ch6;
+	int32_t avg_b = (raw_b1 + raw_b2) / 2 - (int32_t)cal_offset_ch12;
+	*ia =  (float)avg_a * MOTOR_CURRENT_SCALE;
+	*ib = -(float)avg_b * MOTOR_CURRENT_SCALE;
 	return spin ? 0 : -EIO;
 #endif
 }
@@ -336,7 +403,10 @@ int motor_calibrate_currents(void)
 	return 0;
 #else
 	/* Read 64 software-triggered samples.
-	 * Motor must be disabled and duty at 50% so shunt current is zero. */
+	 * Motor must be disabled so no switching transients contaminate the offset.
+	 * The FOC thread is still running but is in IDLE with da=db=dc=0.5; the
+	 * calibration loop races the FOC's motor_read_currents() busy-wait but the
+	 * 64-sample average converges close to 2048 (true mid-rail). */
 	int64_t sum_a = 0, sum_b = 0;
 	const int N = 64;
 
@@ -399,7 +469,9 @@ void motor_adc_dump(char *buf, size_t len)
 	         "raw[0]=%u raw[1]=%u off6=%d off12=%d ia_raw=%d ib_raw=%d "
 	         "DMA EN=%u NDTR=%u LISR=0x%08x "
 	         "ADC SR=0x%02x CR2=0x%08x "
-	         "TIM3 CR1=0x%04x CCMR2=0x%08x CCR4=%u ARR=%u",
+	         "TIM3 CR1=0x%04x CCR4=%u ARR=%u "
+	         "T12s=%u T11s=%u "
+	         "T12_lead=%u T12_SMCR=0x%08x T12_CCR1=%u",
 	         raw0, raw1,
 	         (int)cal_offset_ch6, (int)cal_offset_ch12,
 	         (int)raw0 - (int)cal_offset_ch6,
@@ -410,9 +482,13 @@ void motor_adc_dump(char *buf, size_t len)
 	         (unsigned)ADC1->SR,
 	         (unsigned)ADC1->CR2,
 	         (unsigned)TIM3->CR1,
-	         (unsigned)TIM3->CCMR2,
 	         (unsigned)TIM3->CCR4,
-	         (unsigned)TIM3->ARR);
+	         (unsigned)TIM3->ARR,
+	         (unsigned)last_tim12_cnt,
+	         (unsigned)last_tim11_cnt,
+	         tim12_phase_lead,
+	         (unsigned)TIM12->SMCR,
+	         (unsigned)TIM12->CCR1);
 #endif
 }
 
@@ -498,6 +574,8 @@ float motor_read_encoder(float *theta_rad, float *omega_rad_s)
 
 void motor_set_pwm(float da, float db, float dc)
 {
+#ifdef CONFIG_MOTOR_SIM
+	/* Sim mode: route through Zephyr API so oscilloscope probing still works. */
 	uint32_t pa = (uint32_t)(da * PWM_PERIOD_NS);
 	uint32_t pb = (uint32_t)(db * PWM_PERIOD_NS);
 	uint32_t pc = (uint32_t)(dc * PWM_PERIOD_NS);
@@ -505,6 +583,24 @@ void motor_set_pwm(float da, float db, float dc)
 	pwm_set(pwm_a_dev, PWM_CH_A, PWM_PERIOD_NS, pa, PWM_POLARITY_NORMAL);
 	pwm_set(pwm_b_dev, PWM_CH_B, PWM_PERIOD_NS, pb, PWM_POLARITY_NORMAL);
 	pwm_set(pwm_c_dev, PWM_CH_C, PWM_PERIOD_NS, pc, PWM_POLARITY_NORMAL);
+#else
+	/* Write CCR preload registers directly — avoids Zephyr's pwm_set() which
+	 * calls EGR=UG and resets the timer counter on every call.  That reset
+	 * de-synchronises TIM12/TIM11 from TIM3, putting them in the wrong phase
+	 * at the ADC sample point and corrupting IB/IC measurements.
+	 * Zephyr enabled CCR preload (OCxPE) at init; direct writes are glitch-free
+	 * and take effect at the next timer overflow. */
+	uint32_t ccr3_a = (uint32_t)(da * pwm_counts_a);
+
+	TIM3->CCR3  = ccr3_a;
+	TIM12->CCR1 = (uint32_t)(db * pwm_counts_b);
+	TIM11->CCR1 = (uint32_t)(dc * pwm_counts_c);
+
+	/* Track Phase A's zero-ripple point: CCR4 = midpoint of Phase A LOW window.
+	 * Phase A LOW runs from CCR3 to ARR; zero-ripple is at (CCR3 + ARR) / 2.
+	 * CCR4 has preload (OC4PE), so this takes effect at the next overflow. */
+	TIM3->CCR4 = (ccr3_a + (pwm_counts_a - 1U)) / 2U;
+#endif
 }
 
 /* ─── Simulation update (CONFIG_MOTOR_SIM only) ──────────────────────────── */

@@ -11,7 +11,7 @@
 
 #define FOC_POLE_PAIRS       7          /* Motor pole pair count */
 #define FOC_MAX_CURRENT_A    8.0f      /* Overcurrent trip threshold [A] */
-#define FOC_MAX_TORQUE_A     6.0f       /* Speed PI output clamp [A] — must be
+#define FOC_MAX_TORQUE_A     7.5f       /* Speed PI output clamp [A] — must be
                                          * < FOC_MAX_CURRENT_A so phase current
                                          * transients don't trip overcurrent     */
 #define FOC_MAX_SPEED_RPM    5000.0f
@@ -21,9 +21,15 @@
 #define FOC_MOTOR_L_H        1.6e-5f   /* Stator inductance [H]  — measured ~16 µH */
 #define FOC_MOTOR_PSI_WB     7.2e-4f /* PM flux linkage [Wb]   — measured: 0.00072 Wb */
 
-/* Alignment: apply Id_align at theta=0 for align_ms */
-#define FOC_ALIGN_CURRENT_A  1.0f
-#define FOC_ALIGN_MS         500
+/* Alignment: two-phase open-loop voltage (no current PI, no OC check).
+ * Phase 1 (first 25%): hold field at π/2 — rotor settles near π/2 equilibrium.
+ * Phase 2 (last 75%): linearly ramp field from π/2 → 0° — rotor is dragged to 0°.
+ * Direct voltage bypasses the current loop for reliable operation regardless of
+ * ADC-range limitations; OC check is re-enabled on entry to RUNNING.
+ * FOC_ALIGN_MS is the config value; actual duration ≈ 1.5 s at the ~4 kHz
+ * real control rate (10 kHz assumed but timer runs slower in practice). */
+#define FOC_ALIGN_VOLTAGE_V  2.0f
+#define FOC_ALIGN_MS         600
 
 /* Default current PI gains — tuned for L=16µH, R=0.182Ω, ω_bw=500 rad/s
  * Kp = ω_bw × L = 0.008,  Ki = ω_bw × R = 91 */
