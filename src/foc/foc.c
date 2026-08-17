@@ -170,24 +170,30 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 		return;
 
 	/* ── ALIGNING: open-loop field ramp to resolve the θ=0 / θ=π ambiguity ──
-	 * Phase 1 (first 25%): hold field at π/2 — rotor settles at ~π/2.
-	 * Phase 2 (last  75%): linearly ramp field from π/2 → 0° — rotor is
-	 * dragged from its π/2 equilibrium to the 0° equilibrium unambiguously.
+	 * Phase 1 (25%): hold field at π/2 — rotor settles at ~π/2.
+	 * Phase 2 (50%): ramp field from π/2 → 0° — rotor is dragged to 0°.
+	 * Phase 3 (25%): hold field at 0° — rotor momentum damps before RUNNING.
 	 * Direct voltage (FOC_ALIGN_VOLTAGE_V) bypasses the current PI: the actual
 	 * alignment current saturates the ADC, so PI control is unreliable here.
 	 * OC check is skipped during alignment for the same reason; it resumes on
 	 * entry to RUNNING.                                                         */
 	case FOC_STATE_ALIGNING: {
-		const int total_ticks  = (FOC_ALIGN_MS * FOC_CONTROL_HZ) / 1000;
-		const int phase2_ticks = total_ticks * 3 / 4;  /* 75% for the ramp */
+		const int total_ticks = (FOC_ALIGN_MS * FOC_CONTROL_HZ) / 1000;
+		/* Boundaries: Phase 1 occupies top 25%, Phase 2 middle 50%,
+		 * Phase 3 bottom 25% of the countdown. */
+		const int p1_boundary = total_ticks * 3 / 4;  /* above → Phase 1 */
+		const int p3_boundary = total_ticks * 1 / 4;  /* below → Phase 3 */
 		float align_angle;
 
-		if (foc->align_ticks_left > phase2_ticks) {
-			align_angle = 1.5707963f;                           /* phase 1: π/2 */
+		if (foc->align_ticks_left > p1_boundary) {
+			align_angle = 1.5707963f;                     /* phase 1: hold π/2 */
+		} else if (foc->align_ticks_left > p3_boundary) {
+			/* phase 2: linearly ramp π/2 → 0 over the middle 50% */
+			float t = (float)(foc->align_ticks_left - p3_boundary)
+			          / (float)(p1_boundary       - p3_boundary);
+			align_angle = 1.5707963f * t;                 /* t: 1→0 as we count down */
 		} else {
-			float progress = 1.0f - (float)foc->align_ticks_left
-			                        / (float)phase2_ticks;
-			align_angle = 1.5707963f * (1.0f - progress);      /* phase 2: π/2→0 */
+			align_angle = 0.0f;                           /* phase 3: hold at 0° */
 		}
 
 		/* Record diagnostic fields (currents in field frame) */

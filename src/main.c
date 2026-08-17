@@ -11,7 +11,8 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 #define FOC_THREAD_STACK  2048
 #define UDP_THREAD_STACK  4096
-#define FOC_THREAD_PRIO   (-2)   /* Cooperative, high priority */
+#define FOC_THREAD_PRIO   (1)    /* Preemptive, high priority — blocks on k_sem_take,
+                                  * yielding to shell/UDP (priority 5) between steps */
 #define UDP_THREAD_PRIO     5
 
 K_THREAD_STACK_DEFINE(foc_stack, FOC_THREAD_STACK);
@@ -65,10 +66,6 @@ static void foc_thread_fn(void *p1, void *p2, void *p3)
 #ifdef CONFIG_MOTOR_SIM
 		motor_sim_update(g_foc.vd, g_foc.vq, FOC_CONTROL_DT);
 #endif
-		/* FOC thread is cooperative (priority -2) and cannot be
-		 * preempted by the shell/UDP threads (preemptive, priority 5).
-		 * Sleep for one system tick so lower-priority threads get CPU. */
-		k_sleep(K_TICKS(1));
 	}
 }
 

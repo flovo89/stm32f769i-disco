@@ -5,7 +5,10 @@
 #include <stdint.h>
 
 /* ─── Tunable parameters ────────────────────────────────────────────────── */
-#define FOC_CONTROL_HZ       10000      /* Control loop rate */
+#define FOC_CONTROL_HZ       5000       /* Control loop rate — limited by the two-point
+                                          * ADC sampling (CCR4 busy-wait ~50 µs + 25 µs
+                                          * ripple-phase wait), leaving ~100 µs/step free
+                                          * for the shell thread at 200 µs period       */
 #define FOC_CONTROL_DT       (1.0f / FOC_CONTROL_HZ)
 #define FOC_PWM_HZ           20000      /* PWM switching frequency */
 
@@ -19,7 +22,9 @@
 /* Motor electrical parameters for decoupling feedforward.
  * Override via set_motor_params at runtime if needed. */
 #define FOC_MOTOR_L_H        1.6e-5f   /* Stator inductance [H]  — measured ~16 µH */
-#define FOC_MOTOR_PSI_WB     7.2e-4f /* PM flux linkage [Wb]   — measured: 0.00072 Wb */
+#define FOC_MOTOR_PSI_WB     1.58e-3f  /* PM flux linkage [Wb]   — identified from
+                                         * vq saturation at 3500–3600 RPM under 3 A:
+                                         * ψ ≈ (vq - R·iq) / ω_e ≈ 0.00156–0.00170 Wb */
 
 /* Alignment: two-phase open-loop voltage (no current PI, no OC check).
  * Phase 1 (first 25%): hold field at π/2 — rotor settles near π/2 equilibrium.
@@ -28,17 +33,26 @@
  * ADC-range limitations; OC check is re-enabled on entry to RUNNING.
  * FOC_ALIGN_MS is the config value; actual duration ≈ 1.5 s at the ~4 kHz
  * real control rate (10 kHz assumed but timer runs slower in practice). */
-#define FOC_ALIGN_VOLTAGE_V  2.0f
-#define FOC_ALIGN_MS         600
+#define FOC_ALIGN_VOLTAGE_V  0.5f   /* Limits alignment id to ~2.75 A (=0.5/R); 2.0 V
+                                      * was saturating the ADC at ~6.5 A during alignment */
+#define FOC_ALIGN_MS         1500
 
 /* Default current PI gains — tuned for L=16µH, R=0.182Ω, ω_bw=500 rad/s
  * Kp = ω_bw × L = 0.008,  Ki = ω_bw × R = 91 */
 #define FOC_KP_CURRENT       0.008f
 #define FOC_KI_CURRENT       91.0f
 
-/* Default speed PI gains */
-#define FOC_KP_SPEED         0.05f
-#define FOC_KI_SPEED         1.0f
+/* Default speed PI gains — J ≈ 1e-4 kg·m², Kt ≈ 0.0166 N·m/A (with ψ=1.58e-3):
+ * K_plant = Kt*60/(J*2π) = 1584 RPM/s/A → ωn = sqrt(K_plant*Ki) = 12.6 rad/s
+ * ζ = K_plant*Kp / (2*ωn); ζ=0.31 at Kp=0.005.
+ * Motor has cogging torque that causes instability near 0 RPM.  Alignment
+ * residual velocity (300–1800 RPM) gets the motor past this zone before the
+ * PI takes over, so cogging is not normally a problem in practice.  */
+#define FOC_KP_SPEED         0.005f  /* ζ≈0.31; higher Kp risks cogging-zone oscillation
+                                      * on RUNNING entry — alignment residual gets motor
+                                      * past cogging before PI takes over, but residual
+                                      * speed is variable (300–1800 RPM) so keep Kp low */
+#define FOC_KI_SPEED         0.10f
 
 /* ─── State machine ─────────────────────────────────────────────────────── */
 typedef enum {

@@ -87,7 +87,7 @@ static int32_t enc_offset;
 /* Windowed velocity estimator — update omega every OMEGA_WINDOW ticks.
  * Per-tick (300 µs) instantaneous delta is 0 or 1 count at low speed;
  * a ~10 ms window accumulates enough counts for usable resolution. */
-#define OMEGA_WINDOW 32
+#define OMEGA_WINDOW 40  /* ~8 ms at 5 kHz */
 
 static uint32_t omega_tick;
 static int32_t  omega_raw_base;
