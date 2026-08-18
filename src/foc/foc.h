@@ -44,15 +44,15 @@
 
 /* Default speed PI gains — J ≈ 1e-4 kg·m², Kt ≈ 0.0166 N·m/A (with ψ=1.58e-3):
  * K_plant = Kt*60/(J*2π) = 1584 RPM/s/A → ωn = sqrt(K_plant*Ki) = 12.6 rad/s
- * ζ = K_plant*Kp / (2*ωn); ζ=0.31 at Kp=0.005.
- * Motor has cogging torque that causes instability near 0 RPM.  Alignment
- * residual velocity (300–1800 RPM) gets the motor past this zone before the
- * PI takes over, so cogging is not normally a problem in practice.  */
-#define FOC_KP_SPEED         0.005f  /* ζ≈0.31; higher Kp risks cogging-zone oscillation
-                                      * on RUNNING entry — alignment residual gets motor
-                                      * past cogging before PI takes over, but residual
-                                      * speed is variable (300–1800 RPM) so keep Kp low */
+ * ζ = K_plant*Kp / (2*ωn); ζ=0.44 at Kp=0.007.
+ * FOC_SPEED_IQ_LIMIT_A caps the PI output so the motor decelerates at ≤3A
+ * from any alignment residual (up to ~1800 RPM).  With the integrator frozen
+ * at 0 by anti-windup during clipped deceleration, the motor arrives at the
+ * target speed with iq≈0 — a smooth, stable transition.                   */
+#define FOC_KP_SPEED         0.007f
 #define FOC_KI_SPEED         0.10f
+#define FOC_SPEED_IQ_LIMIT_A 3.0f   /* speed PI output clamp [A]; prevents violent
+                                      * deceleration into the cogging zone            */
 
 /* ─── State machine ─────────────────────────────────────────────────────── */
 typedef enum {

@@ -84,15 +84,22 @@ static volatile uint16_t __aligned(32) adc_dma_buf[2];
 /* Software position zero — set by motor_reset_encoder() */
 static int32_t enc_offset;
 
-/* Windowed velocity estimator — update omega every OMEGA_WINDOW ticks.
- * Per-tick (300 µs) instantaneous delta is 0 or 1 count at low speed;
- * a ~10 ms window accumulates enough counts for usable resolution. */
-#define OMEGA_WINDOW 40  /* ~8 ms at 5 kHz */
+/* Sliding-window velocity estimator.
+ * A circular buffer holds the last OMEGA_WINDOW raw encoder readings.
+ * Every tick: compare current reading to the oldest entry (OMEGA_WINDOW ticks
+ * ago) to compute velocity.  Updates every tick (vs batch every OMEGA_WINDOW
+ * ticks before), eliminating the periodic 8 ms stale-hold discontinuity that
+ * the speed PI would otherwise see as a sudden error step.
+ *
+ * Scale: omega [rad/s] = delta [counts] * 2π / CPR4 * FOC_HZ / OMEGA_WINDOW
+ * FOC_HZ = 5000 Hz is the expected control-loop rate; the estimator relies on
+ * the timer being accurate rather than measuring wall time.               */
+#define OMEGA_WINDOW  40    /* 8 ms at 5 kHz — determines smoothing bandwidth */
+#define OMEGA_FOC_HZ  5000  /* must match FOC_CONTROL_HZ in foc.h */
 
-static uint32_t omega_tick;
-static int32_t  omega_raw_base;
-static int64_t  omega_time_base;
-static float    omega_hold;
+static int32_t omega_hist[OMEGA_WINDOW]; /* ring buffer of raw encoder values */
+static int     omega_hist_idx;           /* next-write index (= oldest entry)  */
+static float   omega_hold;
 
 static int16_t cal_offset_ch6  = 2048;
 static int16_t cal_offset_ch12 = 2048;
@@ -505,11 +512,13 @@ void motor_reset_encoder(void)
 	sensor_channel_get(qdec_dev, SENSOR_CHAN_ENCODER_COUNT, &val);
 	enc_offset = (int32_t)val.val1;
 
-	/* Reset velocity window to avoid a spike on the next read */
-	omega_tick      = 0;
-	omega_raw_base  = enc_offset;
-	omega_time_base = k_uptime_get() * 1000LL;
-	omega_hold      = 0.0f;
+	/* Prime the velocity ring buffer with enc_offset so the first OMEGA_WINDOW
+	 * ticks of RUNNING show 0 velocity rather than a stale-vs-new spike. */
+	for (int i = 0; i < OMEGA_WINDOW; i++) {
+		omega_hist[i] = enc_offset;
+	}
+	omega_hist_idx = 0;
+	omega_hold     = 0.0f;
 #endif
 }
 
@@ -524,13 +533,10 @@ float motor_read_encoder(float *theta_rad, float *omega_rad_s)
 	sensor_sample_fetch(qdec_dev);
 	sensor_channel_get(qdec_dev, SENSOR_CHAN_ENCODER_COUNT, &val);
 
-	int32_t raw    = (int32_t)val.val1;
-	int64_t now_us = k_uptime_get() * 1000LL;
+	int32_t raw = (int32_t)val.val1;
 
-	/* Position: signed movement from enc_offset, corrected for the 61440-period
-	 * QDEC counter rollover, then wrapped into [0, CPR4).
-	 * MOTOR_ENCODER_POLARITY (-1) reverses direction when the encoder counts
-	 * backward relative to the motor's positive-torque rotation direction. */
+	/* Position: signed movement from enc_offset, corrected for QDEC rollover,
+	 * wrapped into [0, CPR4).  MOTOR_ENCODER_POLARITY reverses direction. */
 	int32_t pos_delta = raw - enc_offset;
 
 	if (pos_delta >  (int32_t)(QDEC_PERIOD / 2)) { pos_delta -= QDEC_PERIOD; }
@@ -542,27 +548,24 @@ float motor_read_encoder(float *theta_rad, float *omega_rad_s)
 
 	*theta_rad = (float)pos * TWO_PI / (float)CPR4;
 
-	/* Velocity: windowed estimator with QDEC-period-correct wraparound */
-	if (++omega_tick >= OMEGA_WINDOW) {
-		omega_tick = 0;
+	/* Velocity: sliding-window estimator — updated every tick.
+	 * omega_hist[omega_hist_idx] holds the oldest reading (OMEGA_WINDOW ticks ago).
+	 * Overwrite it with the current reading, then compute velocity from the delta.
+	 * dt = OMEGA_WINDOW / OMEGA_FOC_HZ = 8 ms — assumed constant (timer-driven). */
+	int32_t oldest = omega_hist[omega_hist_idx];
 
-		int32_t delta = raw - omega_raw_base;
+	omega_hist[omega_hist_idx] = raw;
+	omega_hist_idx = (omega_hist_idx + 1) % OMEGA_WINDOW;
 
-		if (delta >  (int32_t)(QDEC_PERIOD / 2)) { delta -= QDEC_PERIOD; }
-		if (delta < -(int32_t)(QDEC_PERIOD / 2)) { delta += QDEC_PERIOD; }
+	int32_t delta = raw - oldest;
 
-		delta *= MOTOR_ENCODER_POLARITY;
+	if (delta >  (int32_t)(QDEC_PERIOD / 2)) { delta -= QDEC_PERIOD; }
+	if (delta < -(int32_t)(QDEC_PERIOD / 2)) { delta += QDEC_PERIOD; }
 
-		int64_t dt_us = now_us - omega_time_base;
+	delta *= MOTOR_ENCODER_POLARITY;
 
-		if (dt_us > 1000) {
-			omega_hold = (float)delta * TWO_PI / (float)CPR4
-			             / ((float)dt_us * 1e-6f);
-		}
-
-		omega_raw_base  = raw;
-		omega_time_base = now_us;
-	}
+	omega_hold = (float)delta * (TWO_PI / (float)CPR4)
+	             * ((float)OMEGA_FOC_HZ / (float)OMEGA_WINDOW);
 
 	*omega_rad_s = omega_hold;
 

@@ -189,23 +189,73 @@ def cmd_plot(b, args):
     except ImportError:
         print("matplotlib not installed. Run: pip install matplotlib")
         sys.exit(1)
+    import threading
 
     interval_ms = int(args.interval * 1000)
     WINDOW = 200    # samples to show
 
-    t_data     = deque(maxlen=WINDOW)
-    speed      = deque(maxlen=WINDOW)
-    spd_ref    = deque(maxlen=WINDOW)
-    iq         = deque(maxlen=WINDOW)
-    iq_ref     = deque(maxlen=WINDOW)
-    ia         = deque(maxlen=WINDOW)
-    ib         = deque(maxlen=WINDOW)
-    torque     = deque(maxlen=WINDOW)
-    torque_ref = deque(maxlen=WINDOW)
-    theta_e    = deque(maxlen=WINDOW)
+    # Single deque of (t, speed, spd_ref, iq, iq_ref, ia, ib, torque,
+    # torque_ref, theta_e) tuples — appended atomically, no deque-length races.
+    records = deque(maxlen=WINDOW)
+
+    # Mutable state shared between poll thread and _update (GUI thread).
+    latest_state  = ["?"]
+    latest_oc     = [0]
+    consecutive_timeouts = [0]
+    sim_detected  = [False]
+    poll_running  = [True]
 
     t0 = time.time()
-    sim_mode = [False]
+
+    # Separate Board with a short timeout so the poll thread never blocks
+    # longer than the animation interval.
+    # Stored in a list so _poll can replace it on socket errors without
+    # needing a nonlocal declaration (Python 2 style, but avoids closure
+    # issues with daemon thread lifetime).
+    poll_timeout = min(args.interval * 0.8, 0.4)
+    poll_board   = [Board(b._addr[0], b._addr[1], timeout=poll_timeout)]
+
+    def _poll():
+        while poll_running[0]:
+            t_start = time.time()
+            try:
+                s = poll_board[0].status()
+            except OSError:
+                if not poll_running[0]:
+                    break   # intentional shutdown from finally block
+                # Network error (interface down during board reboot).
+                # Close the broken socket, wait for the link to recover,
+                # then open a fresh socket so ARP is re-resolved.
+                try:
+                    poll_board[0].close()
+                except OSError:
+                    pass
+                consecutive_timeouts[0] += 1
+                time.sleep(2.0)
+                if poll_running[0]:
+                    poll_board[0] = Board(b._addr[0], b._addr[1],
+                                          timeout=poll_timeout)
+                continue
+            if s:
+                consecutive_timeouts[0] = 0
+                records.append((
+                    time.time() - t0,
+                    s.get("SPEED", 0),    s.get("SPEED_REF", 0),
+                    s.get("IQ", 0),       s.get("IQ_REF", 0),
+                    s.get("IA", 0),       s.get("IB", 0),
+                    s.get("TORQUE", 0),   s.get("TORQUE_REF", 0),
+                    s.get("THETA_E", 0),
+                ))
+                latest_state[0] = str(s.get("STATE", "?"))
+                latest_oc[0]    = int(s.get("OC", 0))
+                if _is_sim(s):
+                    sim_detected[0] = True
+            else:
+                consecutive_timeouts[0] += 1
+            elapsed = time.time() - t_start
+            remaining = args.interval - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
 
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
     title_base = f"BLDC FOC — {b._addr[0]}"
@@ -246,49 +296,63 @@ def cmd_plot(b, args):
     state_text = ax1.text(0.01, 0.95, "", transform=ax1.transAxes,
                           fontsize=9, verticalalignment="top",
                           bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5))
+    # Shown when no data is arriving (board unreachable)
+    no_data_text = ax1.text(0.5, 0.5, "Waiting for board…",
+                            transform=ax1.transAxes,
+                            fontsize=13, color="gray",
+                            ha="center", va="center", visible=False)
+
+    def _clamp_ylim(ax, min_span):
+        """Expand y-axis to min_span when data range is too small to be visible."""
+        lo, hi = ax.get_ylim()
+        if hi - lo < min_span:
+            center = (lo + hi) / 2
+            # auto=True re-enables autoscaling so the next frame can expand further
+            ax.set_ylim(center - min_span / 2, center + min_span / 2, auto=True)
 
     def _update(_frame):
-        s = b.status()
-        if not s:
-            return (ln_speed, ln_spd_ref, ln_iq, ln_iq_ref, ln_ia, ln_ib,
-                    ln_torque, ln_torque_ref, ln_theta_e)
-
-        if _is_sim(s) and not sim_mode[0]:
-            sim_mode[0] = True
+        if sim_detected[0]:
             fig.suptitle(title_base + "  [SIMULATION]")
+            sim_detected[0] = False
 
-        t = time.time() - t0
-        t_data.append(t)
-        speed.append(s.get("SPEED", 0))
-        spd_ref.append(s.get("SPEED_REF", 0))
-        iq.append(s.get("IQ", 0))
-        iq_ref.append(s.get("IQ_REF", 0))
-        ia.append(s.get("IA", 0))
-        ib.append(s.get("IB", 0))
-        torque.append(s.get("TORQUE", 0))
-        torque_ref.append(s.get("TORQUE_REF", 0))
-        theta_e.append(s.get("THETA_E", 0))
+        recs = list(records)   # single atomic snapshot — no per-deque race
+        no_data = not recs
+        no_data_text.set_visible(no_data)
+        if no_data:
+            if consecutive_timeouts[0] > 5:
+                no_data_text.set_text(
+                    f"No response from board ({consecutive_timeouts[0]} timeouts)")
+            else:
+                no_data_text.set_text("Waiting for board…")
+            return
 
-        td = list(t_data)
-        ln_speed.set_data(td, list(speed))
-        ln_spd_ref.set_data(td, list(spd_ref))
-        ln_iq.set_data(td, list(iq))
-        ln_iq_ref.set_data(td, list(iq_ref))
-        ln_ia.set_data(td, list(ia))
-        ln_ib.set_data(td, list(ib))
-        ln_torque.set_data(td, list(torque))
-        ln_torque_ref.set_data(td, list(torque_ref))
-        ln_theta_e.set_data(td, list(theta_e))
+        td, spd, sref, iq_, iqr, ia_, ib_, tq, tqr, th = zip(*recs)
+
+        ln_speed.set_data(td, spd)
+        ln_spd_ref.set_data(td, sref)
+        ln_iq.set_data(td, iq_)
+        ln_iq_ref.set_data(td, iqr)
+        ln_ia.set_data(td, ia_)
+        ln_ib.set_data(td, ib_)
+        ln_torque.set_data(td, tq)
+        ln_torque_ref.set_data(td, tqr)
+        ln_theta_e.set_data(td, th)
 
         for ax in (ax1, ax2, ax3):
             ax.relim()
             ax.autoscale_view()
         ax4.relim()
-        ax4.autoscale_view(scaley=False)  # keep fixed [0, 2π] range
+        ax4.autoscale_view(scaley=False)
 
-        state_text.set_text(f"State: {s.get('STATE','?')}  OC: {int(s.get('OC',0))}")
-        return (ln_speed, ln_spd_ref, ln_iq, ln_iq_ref, ln_ia, ln_ib,
-                ln_torque, ln_torque_ref, ln_theta_e)
+        # Keep y-ranges wide enough that near-zero signals remain visible
+        _clamp_ylim(ax1, 200)    # ±100 RPM
+        _clamp_ylim(ax2, 4.0)    # ±2 A
+        _clamp_ylim(ax3, 0.10)   # ±0.05 N·m
+
+        state_text.set_text(f"State: {latest_state[0]}  OC: {latest_oc[0]}")
+
+    poll_thread = threading.Thread(target=_poll, daemon=True)
+    poll_thread.start()
 
     ani = animation.FuncAnimation(fig, _update, interval=interval_ms,
                                   blit=False, cache_frame_data=False)
@@ -297,6 +361,12 @@ def cmd_plot(b, args):
         plt.show()
     except KeyboardInterrupt:
         pass
+    finally:
+        poll_running[0] = False
+        try:
+            poll_board[0].close()
+        except OSError:
+            pass
 
 
 # ── Argument parsing ───────────────────────────────────────────────────────────

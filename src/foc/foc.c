@@ -107,10 +107,8 @@ void foc_init(foc_ctx_t *foc, float vbus_v)
 
 	pid_init(&foc->pid_id,    FOC_KP_CURRENT, FOC_KI_CURRENT, -foc->vlim, foc->vlim);
 	pid_init(&foc->pid_iq,    FOC_KP_CURRENT, FOC_KI_CURRENT, -foc->vlim, foc->vlim);
-	/* Speed PI is clamped below the overcurrent threshold so that phase
-	 * current transients don't trip the overcurrent check.              */
 	pid_init(&foc->pid_speed, FOC_KP_SPEED,   FOC_KI_SPEED,
-	         -FOC_MAX_TORQUE_A, FOC_MAX_TORQUE_A);
+	         -FOC_SPEED_IQ_LIMIT_A, FOC_SPEED_IQ_LIMIT_A);
 }
 
 /*
@@ -136,7 +134,8 @@ static bool foc_check_overcurrent(foc_ctx_t *foc, const char *context)
 
 void foc_reset(foc_ctx_t *foc)
 {
-	foc->state = FOC_STATE_IDLE;
+	foc->state  = FOC_STATE_IDLE;
+	foc->iq_ref = 0.0f;
 	foc->da = foc->db = foc->dc = 0.5f;  /* 50% = zero voltage */
 	pid_reset(&foc->pid_id);
 	pid_reset(&foc->pid_iq);
@@ -350,7 +349,7 @@ void foc_tune_current_pid(foc_ctx_t *foc, float kp, float ki)
 void foc_tune_speed_pid(foc_ctx_t *foc, float kp, float ki)
 {
 	pid_init(&foc->pid_speed, kp, ki,
-	         -FOC_MAX_TORQUE_A, FOC_MAX_TORQUE_A);
+	         -FOC_SPEED_IQ_LIMIT_A, FOC_SPEED_IQ_LIMIT_A);
 }
 
 void foc_set_vlim(foc_ctx_t *foc, float vlim_v)
