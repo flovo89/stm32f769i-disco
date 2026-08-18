@@ -84,6 +84,14 @@ static volatile uint16_t __aligned(32) adc_dma_buf[2];
 /* Software position zero — set by motor_reset_encoder() */
 static int32_t enc_offset;
 
+/* Multi-turn cumulative position counter [encoder counts].
+ * Incremented by the per-tick delta every motor_read_encoder() call.
+ * int32_t range: ±2^31 / 4096 = ±524,287 revolutions — effectively unlimited.
+ * enc_last_raw holds the previous raw QDEC reading so the tick delta can be
+ * computed without relying on the abs(raw - enc_offset) range limit. */
+static int32_t enc_pos_counts;
+static int32_t enc_last_raw;
+
 /* Sliding-window velocity estimator.
  * A circular buffer holds the last OMEGA_WINDOW raw encoder readings.
  * Every tick: compare current reading to the oldest entry (OMEGA_WINDOW ticks
@@ -510,7 +518,9 @@ void motor_reset_encoder(void)
 
 	sensor_sample_fetch(qdec_dev);
 	sensor_channel_get(qdec_dev, SENSOR_CHAN_ENCODER_COUNT, &val);
-	enc_offset = (int32_t)val.val1;
+	enc_offset     = (int32_t)val.val1;
+	enc_last_raw   = enc_offset;
+	enc_pos_counts = 0;
 
 	/* Prime the velocity ring buffer with enc_offset so the first OMEGA_WINDOW
 	 * ticks of RUNNING show 0 velocity rather than a stale-vs-new spike. */
@@ -522,10 +532,13 @@ void motor_reset_encoder(void)
 #endif
 }
 
-float motor_read_encoder(float *theta_rad, float *omega_rad_s)
+float motor_read_encoder(float *theta_rad, float *omega_rad_s, float *pos_rad)
 {
 #ifdef CONFIG_MOTOR_SIM
 	sim_get_encoder(&g_sim, theta_rad, omega_rad_s);
+	if (pos_rad) {
+		*pos_rad = g_sim.theta_mech_unwrapped;
+	}
 	return sim_get_speed_rpm(&g_sim);
 #else
 	struct sensor_value val;
@@ -543,6 +556,24 @@ float motor_read_encoder(float *theta_rad, float *omega_rad_s)
 	if (pos_delta < -(int32_t)(QDEC_PERIOD / 2)) { pos_delta += QDEC_PERIOD; }
 
 	pos_delta *= MOTOR_ENCODER_POLARITY;
+
+	/* Cumulative multi-turn position: accumulate per-tick delta instead of
+	 * computing abs(raw - offset), which overflows at ±QDEC_PERIOD/2 (7.5 rev).
+	 * Compute the signed tick delta from the previous raw reading, apply the
+	 * same rollover correction, then accumulate into enc_pos_counts. */
+	{
+		int32_t tick_delta = raw - enc_last_raw;
+
+		if (tick_delta >  (int32_t)(QDEC_PERIOD / 2)) tick_delta -= QDEC_PERIOD;
+		if (tick_delta < -(int32_t)(QDEC_PERIOD / 2)) tick_delta += QDEC_PERIOD;
+		tick_delta     *= MOTOR_ENCODER_POLARITY;
+		enc_pos_counts += tick_delta;
+		enc_last_raw    = raw;
+	}
+
+	if (pos_rad) {
+		*pos_rad = (float)enc_pos_counts * TWO_PI / (float)CPR4;
+	}
 
 	int32_t pos = ((pos_delta % CPR4) + CPR4) % CPR4;
 

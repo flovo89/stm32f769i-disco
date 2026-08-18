@@ -40,7 +40,7 @@ void sim_init(sim_ctx_t *s)
 void sim_reset(sim_ctx_t *s)
 {
     s->id = s->iq = 0.0f;
-    s->omega_mech = s->theta_mech = 0.0f;
+    s->omega_mech = s->theta_mech = s->theta_mech_unwrapped = 0.0f;
     s->vd = s->vq = 0.0f;
 }
 
@@ -83,8 +83,10 @@ void sim_step(sim_ctx_t *s, float dt)
     float T_em      = 1.5f * pp * s->psi_m * s->iq;
     float domega_dt = (T_em - s->B_fric * s->omega_mech - s->T_load) / s->J;
 
-    s->omega_mech += domega_dt * dt;
-    s->theta_mech += s->omega_mech * dt;
+    s->omega_mech            += domega_dt * dt;
+    float dtheta              = s->omega_mech * dt;
+    s->theta_mech            += dtheta;
+    s->theta_mech_unwrapped  += dtheta;
 
     s->theta_mech = fmodf(s->theta_mech, TWO_PI);
     if (s->theta_mech < 0.0f) {

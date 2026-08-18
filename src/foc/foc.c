@@ -109,6 +109,8 @@ void foc_init(foc_ctx_t *foc, float vbus_v)
 	pid_init(&foc->pid_iq,    FOC_KP_CURRENT, FOC_KI_CURRENT, -foc->vlim, foc->vlim);
 	pid_init(&foc->pid_speed, FOC_KP_SPEED,   FOC_KI_SPEED,
 	         -FOC_SPEED_IQ_LIMIT_A, FOC_SPEED_IQ_LIMIT_A);
+	pid_init(&foc->pid_pos,   FOC_KP_POS,     FOC_KI_POS,
+	         -FOC_POS_SPEED_LIMIT,  FOC_POS_SPEED_LIMIT);
 }
 
 /*
@@ -140,17 +142,19 @@ void foc_reset(foc_ctx_t *foc)
 	pid_reset(&foc->pid_id);
 	pid_reset(&foc->pid_iq);
 	pid_reset(&foc->pid_speed);
+	pid_reset(&foc->pid_pos);
 }
 
 /* ─── Control step (called at FOC_CONTROL_HZ) ──────────────────────────── */
 
 void foc_step(foc_ctx_t *foc, float ia, float ib,
-              float theta_mech, float omega_mech)
+              float theta_mech, float omega_mech, float pos_mech)
 {
 	foc->loop_count++;
-	foc->ia = ia;
-	foc->ib = ib;
-	foc->ic = -(ia + ib);
+	foc->ia      = ia;
+	foc->ib      = ib;
+	foc->ic      = -(ia + ib);
+	foc->pos_meas = pos_mech;
 
 	/* Electrical angle */
 	foc->theta_e = fmodf(theta_mech * FOC_POLE_PAIRS, TWO_PI);
@@ -259,8 +263,15 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 	/* ── Park transform (advanced angle) ── */
 	foc_park(foc->ialpha, foc->ibeta, theta_adv, &foc->id, &foc->iq);
 
+	/* ── Position loop (sets speed reference) ── */
+	if (foc->mode == FOC_MODE_POSITION) {
+		float pos_err = foc->pos_ref - foc->pos_meas;
+
+		foc->speed_ref = pid_update(&foc->pid_pos, pos_err, FOC_CONTROL_DT);
+	}
+
 	/* ── Speed loop (sets Iq reference) ── */
-	if (foc->mode == FOC_MODE_SPEED) {
+	if (foc->mode == FOC_MODE_SPEED || foc->mode == FOC_MODE_POSITION) {
 		float speed_err = foc->speed_ref - foc->speed_rpm;
 
 		foc->iq_ref = pid_update(&foc->pid_speed, speed_err, FOC_CONTROL_DT);
@@ -338,6 +349,7 @@ void foc_set_mode(foc_ctx_t *foc, foc_mode_t mode)
 {
 	foc->mode = mode;
 	pid_reset(&foc->pid_speed);
+	pid_reset(&foc->pid_pos);
 }
 
 void foc_set_speed_ref(foc_ctx_t *foc, float rpm)
@@ -372,6 +384,18 @@ void foc_tune_speed_pid(foc_ctx_t *foc, float kp, float ki)
 {
 	pid_init(&foc->pid_speed, kp, ki,
 	         -FOC_SPEED_IQ_LIMIT_A, FOC_SPEED_IQ_LIMIT_A);
+}
+
+void foc_tune_pos_pid(foc_ctx_t *foc, float kp, float ki)
+{
+	float lim = foc->pid_pos.out_max;  /* preserve current speed cap */
+
+	pid_init(&foc->pid_pos, kp, ki, -lim, lim);
+}
+
+void foc_set_pos_ref(foc_ctx_t *foc, float pos_rad)
+{
+	foc->pos_ref = pos_rad;
 }
 
 void foc_set_vlim(foc_ctx_t *foc, float vlim_v)

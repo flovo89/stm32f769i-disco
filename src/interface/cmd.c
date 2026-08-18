@@ -85,7 +85,7 @@ static void run_mosfet_test(const struct shell *sh, char *summary, size_t slen)
 	{
 		float th, om;
 		for (int w = 0; w < 30; w++) {
-			motor_read_encoder(&th, &om);
+			motor_read_encoder(&th, &om, NULL);
 			if (fabsf(om) < 2.0f) { break; }
 			k_sleep(K_MSEC(100));
 		}
@@ -256,6 +256,20 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 		foc_tune_speed_pid(&g_foc, f1, f2);
 		snprintf(resp, resp_len, "OK kp=%.4f ki=%.4f", (double)f1, (double)f2);
 
+	} else if (strcmp(cmd, "set_pos") == 0) {
+		/* set_pos <degrees> — switch to position mode and set target */
+		if (n < 2) { snprintf(resp, resp_len, "ERR usage: set_pos <degrees>"); return; }
+		float pos_rad = f1 * (3.14159265f / 180.0f);
+		foc_set_mode(&g_foc, FOC_MODE_POSITION);
+		foc_set_pos_ref(&g_foc, pos_rad);
+		snprintf(resp, resp_len, "OK pos_ref=%.2f deg (%.4f rad)",
+		         (double)f1, (double)pos_rad);
+
+	} else if (strcmp(cmd, "set_pid_pos") == 0) {
+		if (n < 3) { snprintf(resp, resp_len, "ERR usage: set_pid_pos <kp> <ki>"); return; }
+		foc_tune_pos_pid(&g_foc, f1, f2);
+		snprintf(resp, resp_len, "OK kp=%.4f ki=%.4f", (double)f1, (double)f2);
+
 	} else if (strcmp(cmd, "calibrate") == 0) {
 		if (motor_is_enabled()) {
 			snprintf(resp, resp_len, "ERR disable motor first");
@@ -268,19 +282,25 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 	} else if (strcmp(cmd, "status") == 0) {
 		/* T = 1.5 · p · ψ · iq  [N·m] */
 		float kt = 1.5f * FOC_POLE_PAIRS * g_foc.psi_motor;
+		const char *mode_str =
+			g_foc.mode == FOC_MODE_SPEED    ? "SPEED"    :
+			g_foc.mode == FOC_MODE_POSITION ? "POSITION" : "TORQUE";
+		/* Convert position to degrees for readability */
+		float pos_deg     = g_foc.pos_meas * (180.0f / 3.14159265f);
+		float pos_ref_deg = g_foc.pos_ref  * (180.0f / 3.14159265f);
 		snprintf(resp, resp_len,
 		         "STATE=%s MODE=%s SPEED=%.1f SPEED_REF=%.1f "
 		         "IA=%.3f IB=%.3f ID=%.3f IQ=%.3f IQ_REF=%.3f "
 		         "VD=%.3f VQ=%.3f "
 		         "TORQUE=%.4f TORQUE_REF=%.4f "
 		         "THETA_E=%.3f VBUS=%.1f OC=%u "
-		         "DA=%.3f DB=%.3f DC=%.3f LOOPS=%u"
+		         "DA=%.3f DB=%.3f DC=%.3f LOOPS=%u "
+		         "POS=%.2f POS_REF=%.2f"
 #ifdef CONFIG_MOTOR_SIM
 		         " SIM=1"
 #endif
 		         ,
-		         foc_state_str(g_foc.state),
-		         g_foc.mode == FOC_MODE_SPEED ? "SPEED" : "TORQUE",
+		         foc_state_str(g_foc.state), mode_str,
 		         (double)g_foc.speed_rpm,
 		         (double)g_foc.speed_ref,
 		         (double)g_foc.ia, (double)g_foc.ib,
@@ -293,7 +313,8 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 		         (double)g_foc.vbus,
 		         g_foc.overcurrent_count,
 		         (double)g_foc.da, (double)g_foc.db, (double)g_foc.dc,
-		         g_foc.loop_count);
+		         g_foc.loop_count,
+		         (double)pos_deg, (double)pos_ref_deg);
 
 #ifdef CONFIG_MOTOR_SIM
 	} else if (strcmp(cmd, "sim_load") == 0) {
@@ -333,8 +354,8 @@ static void dispatch(const char *line, char *resp, size_t resp_len)
 	} else {
 		snprintf(resp, resp_len,
 		         "ERR unknown command '%s'  "
-		         "[enable|disable|set_speed|set_torque|"
-		         "set_pid_current|set_pid_speed|set_motor_params|set_vmax|"
+		         "[enable|disable|set_speed|set_torque|set_pos|"
+		         "set_pid_current|set_pid_speed|set_pid_pos|set_motor_params|set_vmax|"
 		         "calibrate|status|mosfet_test|force_duty|reboot"
 #ifdef CONFIG_MOTOR_SIM
 		         "|sim_load|sim_info|sim_params"
@@ -441,6 +462,36 @@ static int sh_set_pid_speed(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int sh_set_pos(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc < 2) {
+		shell_error(sh, "Usage: set_pos <degrees>");
+		return -EINVAL;
+	}
+	char line[64];
+	char resp[BUF_LEN];
+
+	snprintf(line, sizeof(line), "set_pos %s", argv[1]);
+	dispatch(line, resp, sizeof(resp));
+	shell_print(sh, "%s", resp);
+	return 0;
+}
+
+static int sh_set_pid_pos(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc < 3) {
+		shell_error(sh, "Usage: set_pid_pos <kp> <ki>");
+		return -EINVAL;
+	}
+	char line[64];
+	char resp[BUF_LEN];
+
+	snprintf(line, sizeof(line), "set_pid_pos %s %s", argv[1], argv[2]);
+	dispatch(line, resp, sizeof(resp));
+	shell_print(sh, "%s", resp);
+	return 0;
+}
+
 static int sh_set_motor_params(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc < 3) {
@@ -520,6 +571,8 @@ SHELL_CMD_ARG_REGISTER(status,          NULL, "Print motor status",          sh_
 SHELL_CMD_ARG_REGISTER(calibrate,       NULL, "Zero current sensors",        sh_calibrate,      1, 0);
 SHELL_CMD_ARG_REGISTER(set_pid_current,   NULL, "Tune current PID <kp> <ki>",    sh_set_pid_current,   3, 0);
 SHELL_CMD_ARG_REGISTER(set_pid_speed,     NULL, "Tune speed PID <kp> <ki>",      sh_set_pid_speed,     3, 0);
+SHELL_CMD_ARG_REGISTER(set_pos,           NULL, "Set target position [degrees]",  sh_set_pos,           2, 0);
+SHELL_CMD_ARG_REGISTER(set_pid_pos,       NULL, "Tune position PID <kp> <ki>",    sh_set_pid_pos,       3, 0);
 SHELL_CMD_ARG_REGISTER(set_motor_params,  NULL, "Set feedforward: <L_mH> <psi>", sh_set_motor_params,  3, 0);
 SHELL_CMD_ARG_REGISTER(set_vmax,          NULL, "Limit output voltage [V] (0=full)", sh_set_vmax,     2, 0);
 SHELL_CMD_ARG_REGISTER(force_duty,        NULL, "Force PWM duty <da> <db> <dc>",     sh_force_duty,   4, 0);

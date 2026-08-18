@@ -54,6 +54,17 @@
 #define FOC_SPEED_IQ_LIMIT_A 3.0f   /* speed PI output clamp [A]; prevents violent
                                       * deceleration into the cogging zone            */
 
+/* Default position PI gains.
+ * The position loop is the outermost cascade, feeding a speed reference into
+ * the speed PI.  Plant from speed_ref [RPM] to position [rad]:
+ *   θ(s) = speed_ref * (2π/60) / s
+ * With a P controller: crossover ω_c = Kp * (2π/60) rad/s.
+ * At Kp=30 → ω_c ≈ 3.1 rad/s (~4× below speed loop BW of 12.6 rad/s).
+ * Ki adds a slow integral to overcome static friction and cogging hold.    */
+#define FOC_KP_POS           30.0f  /* RPM per radian of position error */
+#define FOC_KI_POS            2.0f  /* RPM per (radian·second) */
+#define FOC_POS_SPEED_LIMIT  500.0f /* position loop speed cap [RPM] */
+
 /* ─── State machine ─────────────────────────────────────────────────────── */
 typedef enum {
 	FOC_STATE_IDLE,
@@ -64,8 +75,9 @@ typedef enum {
 } foc_state_t;
 
 typedef enum {
-	FOC_MODE_TORQUE,   /* Direct Iq reference */
-	FOC_MODE_SPEED,    /* Speed loop sets Iq */
+	FOC_MODE_TORQUE,    /* Direct Iq reference */
+	FOC_MODE_SPEED,     /* Speed loop sets Iq */
+	FOC_MODE_POSITION,  /* Position loop → speed_ref → speed loop → Iq */
 } foc_mode_t;
 
 typedef struct {
@@ -95,10 +107,15 @@ typedef struct {
 	pid_ctrl_t pid_id;
 	pid_ctrl_t pid_iq;
 	pid_ctrl_t pid_speed;
+	pid_ctrl_t pid_pos;
 
 	/* Motor electrical params for decoupling feedforward */
 	float L_motor;   /* Stator inductance [H]  */
 	float psi_motor; /* PM flux linkage [Wb]   */
+
+	/* Position control */
+	float pos_ref;   /* Target position [rad, mechanical, relative to alignment zero] */
+	float pos_meas;  /* Measured position [rad] — updated each foc_step call */
 
 	/* Alignment */
 	int   align_ticks_left;
@@ -122,9 +139,10 @@ void foc_reset(foc_ctx_t *foc);
  * Called from the control thread at FOC_CONTROL_HZ.
  * theta_mech: mechanical angle [rad], wrapping [0, 2π)
  * omega_mech: mechanical angular velocity [rad/s]
+ * pos_mech:   unwrapped cumulative position [rad] from motor_reset_encoder()
  */
 void foc_step(foc_ctx_t *foc, float ia, float ib,
-              float theta_mech, float omega_mech);
+              float theta_mech, float omega_mech, float pos_mech);
 
 void foc_enable(foc_ctx_t *foc, bool enable);
 void foc_set_mode(foc_ctx_t *foc, foc_mode_t mode);
@@ -132,6 +150,9 @@ void foc_set_speed_ref(foc_ctx_t *foc, float rpm);
 void foc_set_torque_ref(foc_ctx_t *foc, float iq_amps);
 void foc_tune_current_pid(foc_ctx_t *foc, float kp, float ki);
 void foc_tune_speed_pid(foc_ctx_t *foc, float kp, float ki);
+void foc_tune_pos_pid(foc_ctx_t *foc, float kp, float ki);
+
+void foc_set_pos_ref(foc_ctx_t *foc, float pos_rad);
 void foc_set_vlim(foc_ctx_t *foc, float vlim_v);
 void foc_set_forced_duty(foc_ctx_t *foc, float da, float db, float dc);
 

@@ -52,15 +52,15 @@ static void foc_thread_fn(void *p1, void *p2, void *p3)
 	while (1) {
 		k_sem_take(&foc_sem, K_FOREVER);
 
-		float ia, ib, theta, omega;
+		float ia, ib, theta, omega, pos;
 
 		if (motor_read_currents(&ia, &ib) != 0) {
 			/* ADC error — keep running with zero current */
 			ia = ib = 0.0f;
 		}
 
-		motor_read_encoder(&theta, &omega);
-		foc_step(&g_foc, ia, ib, theta, omega);
+		motor_read_encoder(&theta, &omega, &pos);
+		foc_step(&g_foc, ia, ib, theta, omega, pos);
 		motor_set_pwm(g_foc.da, g_foc.db, g_foc.dc);
 
 #ifdef CONFIG_MOTOR_SIM

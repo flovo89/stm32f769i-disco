@@ -43,10 +43,12 @@ bool motor_is_enabled(void);
 int motor_read_currents(float *ia, float *ib);
 
 /*
- * Read mechanical angle [rad, 0..2π) and angular velocity [rad/s].
+ * Read mechanical angle [rad, 0..2π), angular velocity [rad/s], and
+ * (optionally) unwrapped cumulative position [rad] relative to the last
+ * motor_reset_encoder() call.  Pass NULL for pos_rad if not needed.
  * Returns speed in RPM.
  */
-float motor_read_encoder(float *theta_rad, float *omega_rad_s);
+float motor_read_encoder(float *theta_rad, float *omega_rad_s, float *pos_rad);
 
 /*
  * Apply PWM duty cycles [0..1] to the three inverter legs.

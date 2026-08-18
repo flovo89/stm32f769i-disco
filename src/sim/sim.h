@@ -30,8 +30,9 @@ typedef struct {
     /* State (integrated each control tick) */
     float id;
     float iq;
-    float omega_mech; /* Mechanical angular velocity [rad/s] */
-    float theta_mech; /* Mechanical angle [rad, 0..2π) */
+    float omega_mech;          /* Mechanical angular velocity [rad/s] */
+    float theta_mech;          /* Mechanical angle [rad, 0..2π) — wrapped */
+    float theta_mech_unwrapped; /* Cumulative angle [rad] — for position control */
 
     /* Last applied voltages (set by motor_sim_update) */
     float vd;
