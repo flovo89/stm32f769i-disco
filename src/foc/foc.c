@@ -246,8 +246,18 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 	/* ── Clarke transform ── */
 	foc_clarke(ia, ib, &foc->ialpha, &foc->ibeta);
 
-	/* ── Park transform ── */
-	foc_park(foc->ialpha, foc->ibeta, foc->theta_e, &foc->id, &foc->iq);
+	/* Advance electrical angle by one control period to compensate for the
+	 * delay between current sampling and voltage application.  The duty
+	 * cycles written this tick take effect at the next PWM counter overflow,
+	 * so the voltage acts on the rotor one step later than the angle used
+	 * in the Park transform.  Without this the d/q frame lags the rotor by
+	 * ~8° at 1000 RPM (omega_e*DT ≈ 0.15 rad), coupling d and q axes. */
+	float theta_adv = foc->theta_e + foc->omega_e * FOC_CONTROL_DT;
+	if (theta_adv >= TWO_PI) theta_adv -= TWO_PI;
+	if (theta_adv <    0.0f) theta_adv += TWO_PI;
+
+	/* ── Park transform (advanced angle) ── */
+	foc_park(foc->ialpha, foc->ibeta, theta_adv, &foc->id, &foc->iq);
 
 	/* ── Speed loop (sets Iq reference) ── */
 	if (foc->mode == FOC_MODE_SPEED) {
@@ -257,40 +267,52 @@ void foc_step(foc_ctx_t *foc, float ia, float ib,
 	}
 
 	/* ── Current loops ── */
-	foc->vd = pid_update(&foc->pid_id, foc->id_ref - foc->id, FOC_CONTROL_DT);
-	foc->vq = pid_update(&foc->pid_iq, foc->iq_ref - foc->iq, FOC_CONTROL_DT);
+	float id_err = foc->id_ref - foc->id;
+	float iq_err = foc->iq_ref - foc->iq;
+	float vd_pi  = pid_update(&foc->pid_id, id_err, FOC_CONTROL_DT);
+	float vq_pi  = pid_update(&foc->pid_iq, iq_err, FOC_CONTROL_DT);
 
 	/* ── Feed-forward decoupling (cross-coupling + back-EMF) ──
 	 *   vd_ff = -ω_e · L · iq
 	 *   vq_ff = +ω_e · (L · id + ψ_m)
-	 * Dead zone ±50 rad/s (≈ ±68 RPM): stall-twitches cause the velocity
-	 * estimator to register spurious high omega, injecting a large erroneous
-	 * VD that destabilises the current loop.  Below this speed the PI alone
-	 * handles cross-coupling; above it the feedforward is engaged.
-	 * Hard clamp at ±4000 rad/s prevents corruption from wider velocity
-	 * noise bursts.                                                        */
+	 * Smooth ramp from 0→1 over [50, 100] rad/s replaces the hard dead zone.
+	 * A hard cutoff at ±50 rad/s created a step disturbance in vd/vq every
+	 * time the speed crossed ±68 RPM, which the current PI had to absorb.
+	 * Hard clamp at ±4000 rad/s prevents corruption from velocity noise. */
 	float omega_ff = foc->omega_e;
+	if (omega_ff >  4000.0f) omega_ff =  4000.0f;
+	if (omega_ff < -4000.0f) omega_ff = -4000.0f;
 
-	if (omega_ff >  -50.0f && omega_ff <  50.0f) { omega_ff =  0.0f; }
-	if (omega_ff >  4000.0f) { omega_ff =  4000.0f; }
-	if (omega_ff < -4000.0f) { omega_ff = -4000.0f; }
-	foc->vd -= omega_ff * foc->L_motor * foc->iq;
-	foc->vq += omega_ff * (foc->L_motor * foc->id + foc->psi_motor);
+	float ff_gain = (fabsf(omega_ff) - 50.0f) / 50.0f;
+	if (ff_gain < 0.0f) ff_gain = 0.0f;
+	if (ff_gain > 1.0f) ff_gain = 1.0f;
+	omega_ff *= ff_gain;
 
-	/* ── Hard voltage clamp (PI + feedforward combined) ──
-	 * Limits peak phase current regardless of feedforward accuracy.
-	 * Clamps voltage vector magnitude, preserving direction. */
+	float vd_ff = -omega_ff * foc->L_motor * foc->iq;
+	float vq_ff =  omega_ff * (foc->L_motor * foc->id + foc->psi_motor);
+
+	foc->vd = vd_pi + vd_ff;
+	foc->vq = vq_pi + vq_ff;
+
+	/* ── Vector magnitude clamp with back-calculation anti-windup ──
+	 * The per-axis PI output is bounded to ±vlim, but feedforward is added
+	 * on top before the vector clamp.  At moderate speeds the back-EMF term
+	 * alone (ω_e·ψ_m ≈ 0.6 V at 500 RPM) can push the combined vector above
+	 * vlim.  Without anti-windup the PI integrators keep accumulating as if
+	 * the full PI output was applied, causing windup and iq overshoot.
+	 * Back-calculation: correct each integrator by the amount the vector
+	 * clamp removed from that axis's PI contribution. */
 	float vmag = sqrtf(foc->vd * foc->vd + foc->vq * foc->vq);
-
 	if (vmag > foc->vlim && vmag > 0.0f) {
 		float scale = foc->vlim / vmag;
-
 		foc->vd *= scale;
 		foc->vq *= scale;
+		foc->pid_id.integrator += (foc->vd - vd_ff) - vd_pi;
+		foc->pid_iq.integrator += (foc->vq - vq_ff) - vq_pi;
 	}
 
-	/* ── Inverse Park + SVPWM ── */
-	foc_inv_park(foc->vd, foc->vq, foc->theta_e, &foc->valpha, &foc->vbeta);
+	/* ── Inverse Park + SVPWM (same advanced angle used in forward Park) ── */
+	foc_inv_park(foc->vd, foc->vq, theta_adv, &foc->valpha, &foc->vbeta);
 	foc_svpwm(foc->valpha, foc->vbeta, foc->vbus,
 	          &foc->da, &foc->db, &foc->dc);
 }
