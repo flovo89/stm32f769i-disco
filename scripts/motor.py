@@ -195,7 +195,7 @@ def cmd_plot(b, args):
     WINDOW = 200    # samples to show
 
     # Single deque of (t, speed, spd_ref, iq, iq_ref, ia, ib, torque,
-    # torque_ref, theta_e) tuples — appended atomically, no deque-length races.
+    # torque_ref, theta_e, pos, pos_ref) tuples — appended atomically.
     records = deque(maxlen=WINDOW)
 
     # Mutable state shared between poll thread and _update (GUI thread).
@@ -245,6 +245,7 @@ def cmd_plot(b, args):
                     s.get("IA", 0),       s.get("IB", 0),
                     s.get("TORQUE", 0),   s.get("TORQUE_REF", 0),
                     s.get("THETA_E", 0),
+                    s.get("POS", 0),      s.get("POS_REF", 0),
                 ))
                 latest_state[0] = str(s.get("STATE", "?"))
                 latest_oc[0]    = int(s.get("OC", 0))
@@ -257,7 +258,7 @@ def cmd_plot(b, args):
             if remaining > 0:
                 time.sleep(remaining)
 
-    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(10, 10), sharex=True)
+    fig, (ax1, ax2, ax3, ax4, ax5) = plt.subplots(5, 1, figsize=(10, 12), sharex=True)
     title_base = f"BLDC FOC — {b._addr[0]}"
     fig.suptitle(title_base)
 
@@ -289,9 +290,16 @@ def cmd_plot(b, args):
     ax4.axhline(6.28318, color="gray", linestyle=":", linewidth=0.8, alpha=0.6)
     ax4.set_ylabel("θ_e [rad]")
     ax4.set_ylim(-0.1, 6.4)
-    ax4.set_xlabel("Time [s]")
     ax4.legend(loc="upper left")
     ax4.grid(True, alpha=0.3)
+
+    ln_pos,     = ax5.plot([], [], label="Position (°)",     color="tab:brown")
+    ln_pos_ref, = ax5.plot([], [], label="Position ref (°)", color="tab:brown",
+                           linestyle="--", alpha=0.5)
+    ax5.set_ylabel("Position [°]")
+    ax5.set_xlabel("Time [s]")
+    ax5.legend(loc="upper left")
+    ax5.grid(True, alpha=0.3)
 
     state_text = ax1.text(0.01, 0.95, "", transform=ax1.transAxes,
                           fontsize=9, verticalalignment="top",
@@ -326,7 +334,7 @@ def cmd_plot(b, args):
                 no_data_text.set_text("Waiting for board…")
             return
 
-        td, spd, sref, iq_, iqr, ia_, ib_, tq, tqr, th = zip(*recs)
+        td, spd, sref, iq_, iqr, ia_, ib_, tq, tqr, th, pos, pref = zip(*recs)
 
         ln_speed.set_data(td, spd)
         ln_spd_ref.set_data(td, sref)
@@ -337,17 +345,22 @@ def cmd_plot(b, args):
         ln_torque.set_data(td, tq)
         ln_torque_ref.set_data(td, tqr)
         ln_theta_e.set_data(td, th)
+        ln_pos.set_data(td, pos)
+        ln_pos_ref.set_data(td, pref)
 
         for ax in (ax1, ax2, ax3):
             ax.relim()
             ax.autoscale_view()
         ax4.relim()
         ax4.autoscale_view(scaley=False)
+        ax5.relim()
+        ax5.autoscale_view()
 
         # Keep y-ranges wide enough that near-zero signals remain visible
         _clamp_ylim(ax1, 200)    # ±100 RPM
         _clamp_ylim(ax2, 4.0)    # ±2 A
         _clamp_ylim(ax3, 0.10)   # ±0.05 N·m
+        _clamp_ylim(ax5, 10.0)   # ±5°
 
         state_text.set_text(f"State: {latest_state[0]}  OC: {latest_oc[0]}")
 
